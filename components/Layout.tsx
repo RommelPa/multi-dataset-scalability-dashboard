@@ -41,7 +41,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, notifications }) => {
                       <div key={i} className={`px-4 py-3 border-b border-slate-100 last:border-0 hover:bg-slate-50 ${n.type === 'ETL_ERROR' ? 'border-l-4 border-l-red-500' : 'border-l-4 border-l-green-500'}`}>
                         <div className="flex justify-between items-start mb-1">
                           <span className="font-bold text-sm">{n.type}</span>
-                          <span className="text-[10px] text-slate-400">{new Date(n.ts).toLocaleTimeString()}</span>
+                          <span className="text-[10px] text-slate-400">{new Date(n.ts || Date.now()).toLocaleTimeString()}</span>
                         </div>
                         <p className="text-xs text-slate-600 truncate">Source: {n.source_id}</p>
                         {n.message && <p className="text-xs text-slate-500 mt-1">{n.message}</p>}

@@ -1,7 +1,7 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ChartCard } from '../components/ChartCard';
-import { mockBackend } from '../services/mockBackend';
+import { fetchBalance, fetchBalanceYears, fetchSources, subscribeToEvents } from '../services/api';
 import { DatasetType, Source } from '../types';
 
 declare const echarts: any;
@@ -9,16 +9,106 @@ declare const echarts: any;
 export const BalanceDashboard: React.FC = () => {
   const [sources, setSources] = useState<Source[]>([]);
   const [selectedSource, setSelectedSource] = useState<string>('');
-  const [year, setYear] = useState<number>(2024);
+  const [year, setYear] = useState<number>(new Date().getFullYear());
+  const [years, setYears] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [totals, setTotals] = useState<{regulados: number; libres: number; coes: number; total: number}>({regulados: 0, libres: 0, coes: 0, total: 0});
 
   const mainChartRef = useRef<HTMLDivElement>(null);
   const donutChartRef = useRef<HTMLDivElement>(null);
 
+  const refreshYears = useCallback(async () => {
+    try {
+      const availableYears = await fetchBalanceYears();
+      setYears(availableYears);
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
+  const refreshData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchBalance(year);
+      const totalRegulados = data.regulados.reduce((a, b) => a + b, 0);
+      const totalLibres = data.libres.reduce((a, b) => a + b, 0);
+      const totalCoes = data.coes.reduce((a, b) => a + b, 0);
+      const summaryTotals = {
+        regulados: totalRegulados / 1000,
+        libres: totalLibres / 1000,
+        coes: totalCoes / 1000,
+        total: (totalRegulados + totalLibres + totalCoes) / 1000,
+      };
+      setTotals(summaryTotals);
+      
+      if (mainChartRef.current) {
+        const chart = echarts.getInstanceByDom(mainChartRef.current) || echarts.init(mainChartRef.current);
+        chart.setOption({
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+          legend: { data: ['Regulados', 'Libres', 'COES', 'Total'], bottom: 0 },
+          grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+          xAxis: { type: 'category', data: data.months },
+          yAxis: { type: 'value', name: 'GWh' },
+          series: [
+            { name: 'Regulados', type: 'bar', stack: 'total', color: '#6366f1', data: data.regulados.map(v => v/1000) },
+            { name: 'Libres', type: 'bar', stack: 'total', color: '#f59e0b', data: data.libres.map(v => v/1000) },
+            { name: 'COES', type: 'bar', stack: 'total', color: '#10b981', data: data.coes.map(v => v/1000) },
+            { name: 'Total', type: 'line', color: '#ef4444', data: data.total.map(v => v/1000), smooth: true }
+          ]
+        });
+      }
+  
+      if (donutChartRef.current) {
+        const chart = echarts.getInstanceByDom(donutChartRef.current) || echarts.init(donutChartRef.current);
+        chart.setOption({
+          tooltip: { trigger: 'item', formatter: '{b}: {c} GWh ({d}%)' },
+          legend: { orient: 'vertical', left: 'left', textStyle: { fontSize: 10 } },
+          series: [{
+            name: 'Acumulado Anual',
+            type: 'pie',
+            radius: ['40%', '70%'],
+            avoidLabelOverlap: false,
+            itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
+            label: { show: false },
+            data: [
+              { value: summaryTotals.regulados.toFixed(1), name: 'Regulados', itemStyle: { color: '#6366f1' } },
+              { value: summaryTotals.libres.toFixed(1), name: 'Libres', itemStyle: { color: '#f59e0b' } },
+              { value: summaryTotals.coes.toFixed(1), name: 'COES', itemStyle: { color: '#10b981' } }
+            ]
+          }]
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      setError('No se pudo obtener los datos del año seleccionado');
+    } finally {
+      setLoading(false);
+    }
+  }, [year]);
+
   useEffect(() => {
-    const s = mockBackend.getSources().filter(src => src.dataset_id === DatasetType.BALANCE);
-    setSources(s);
-    if (s.length > 0) setSelectedSource(s[0].source_id);
+    const load = async () => {
+      try {
+        const [apiSources, availableYears] = await Promise.all([fetchSources(), fetchBalanceYears()]);
+        const balanceSources = apiSources.filter(src => src.dataset_id === DatasetType.BALANCE);
+        setSources(balanceSources);
+        if (balanceSources.length > 0) {
+          setSelectedSource(balanceSources[0].source_id);
+        } else {
+          setSelectedSource('balance-xlsx');
+        }
+        setYears(availableYears);
+        if (availableYears.length > 0) {
+          setYear(availableYears[availableYears.length - 1]);
+        }
+      } catch (err) {
+        console.error(err);
+        setError('No se pudo cargar configuración inicial');
+      }
+    };
+    load();
   }, []);
 
   useEffect(() => {
@@ -26,53 +116,15 @@ export const BalanceDashboard: React.FC = () => {
     refreshData();
   }, [selectedSource, year]);
 
-  const refreshData = async () => {
-    setLoading(true);
-    const data = await mockBackend.getBalanceData(selectedSource, year);
-    
-    if (mainChartRef.current) {
-      const chart = echarts.getInstanceByDom(mainChartRef.current) || echarts.init(mainChartRef.current);
-      chart.setOption({
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-        legend: { data: ['Regulados', 'Libres', 'COES', 'Total'], bottom: 0 },
-        grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
-        xAxis: { type: 'category', data: data.months },
-        yAxis: { type: 'value', name: 'GWh' },
-        series: [
-          { name: 'Regulados', type: 'bar', stack: 'total', color: '#6366f1', data: data.regulados.map(v => v/1000) },
-          { name: 'Libres', type: 'bar', stack: 'total', color: '#f59e0b', data: data.libres.map(v => v/1000) },
-          { name: 'COES', type: 'bar', stack: 'total', color: '#10b981', data: data.coes.map(v => v/1000) },
-          { name: 'Total', type: 'line', color: '#ef4444', data: data.total.map(v => v/1000), smooth: true }
-        ]
-      });
-    }
-
-    if (donutChartRef.current) {
-      const chart = echarts.getInstanceByDom(donutChartRef.current) || echarts.init(donutChartRef.current);
-      const totalRegulados = data.regulados.reduce((a, b) => a + b, 0);
-      const totalLibres = data.libres.reduce((a, b) => a + b, 0);
-      const totalCoes = data.coes.reduce((a, b) => a + b, 0);
-
-      chart.setOption({
-        tooltip: { trigger: 'item', formatter: '{b}: {c} GWh ({d}%)' },
-        legend: { orient: 'vertical', left: 'left', textStyle: { fontSize: 10 } },
-        series: [{
-          name: 'Acumulado Anual',
-          type: 'pie',
-          radius: ['40%', '70%'],
-          avoidLabelOverlap: false,
-          itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
-          label: { show: false },
-          data: [
-            { value: (totalRegulados/1000).toFixed(1), name: 'Regulados', itemStyle: { color: '#6366f1' } },
-            { value: (totalLibres/1000).toFixed(1), name: 'Libres', itemStyle: { color: '#f59e0b' } },
-            { value: (totalCoes/1000).toFixed(1), name: 'COES', itemStyle: { color: '#10b981' } }
-          ]
-        }]
-      });
-    }
-    setLoading(false);
-  };
+  useEffect(() => {
+    const unsubscribe = subscribeToEvents((event) => {
+      if (event.type === 'DATASET_UPDATED' && event.dataset_id === DatasetType.BALANCE) {
+        refreshData();
+        refreshYears();
+      }
+    });
+    return () => unsubscribe();
+  }, [refreshData, refreshYears]);
 
   const handleExport = (ref: React.RefObject<HTMLDivElement>, name: string) => {
     if (!ref.current) return;
@@ -103,6 +155,7 @@ export const BalanceDashboard: React.FC = () => {
             onChange={(e) => setSelectedSource(e.target.value)}
             className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
           >
+            {sources.length === 0 && <option value="balance-xlsx">balance-xlsx</option>}
             {sources.map(s => <option key={s.source_id} value={s.source_id}>{s.source_id}</option>)}
           </select>
           <select 
@@ -110,7 +163,7 @@ export const BalanceDashboard: React.FC = () => {
             onChange={(e) => setYear(Number(e.target.value))}
             className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
           >
-            {[2020, 2021, 2022, 2023, 2024, 2025].map(y => <option key={y} value={y}>{y}</option>)}
+            {(years.length === 0 ? [year] : years).map(y => <option key={y} value={y}>{y}</option>)}
           </select>
           <button 
             onClick={refreshData}
@@ -141,11 +194,17 @@ export const BalanceDashboard: React.FC = () => {
         </div>
       </div>
 
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+          {error}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        <SummaryItem label="Regulados" color="indigo" unit="GWh" value={842} />
-        <SummaryItem label="Libres" color="amber" unit="GWh" value={1205} />
-        <SummaryItem label="COES" color="emerald" unit="GWh" value={345} />
-        <SummaryItem label="Total" color="red" unit="GWh" value={2392} />
+        <SummaryItem label="Regulados" color="indigo" unit="GWh" value={totals.regulados} />
+        <SummaryItem label="Libres" color="amber" unit="GWh" value={totals.libres} />
+        <SummaryItem label="COES" color="emerald" unit="GWh" value={totals.coes} />
+        <SummaryItem label="Total" color="red" unit="GWh" value={totals.total} />
       </div>
     </div>
   );

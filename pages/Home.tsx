@@ -1,20 +1,31 @@
 
 import React, { useState, useEffect } from 'react';
 import { DatasetMetadata, Source, DatasetType } from '../types';
-import { mockBackend } from '../services/mockBackend';
+import { fetchDatasets, fetchSources, registerSource } from '../services/api';
 
 export const Home: React.FC = () => {
   const [datasets, setDatasets] = useState<DatasetMetadata[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [isRegistering, setIsRegistering] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setDatasets(mockBackend.getDatasets());
-    setSources(mockBackend.getSources());
+    const load = async () => {
+      try {
+        const [ds, sc] = await Promise.all([fetchDatasets(), fetchSources()]);
+        setDatasets(ds);
+        setSources(sc);
+      } catch (err) {
+        console.error(err);
+        setError('No se pudieron cargar los metadatos iniciales');
+      }
+    };
+    load();
   }, []);
 
-  const handleRegisterSource = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleRegisterSource = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    setError(null);
     const formData = new FormData(e.currentTarget);
     const newSource: Partial<Source> = {
       source_id: formData.get('source_id') as string,
@@ -22,13 +33,20 @@ export const Home: React.FC = () => {
       file_name: formData.get('file_name') as string,
       enabled: true
     };
-    mockBackend.registerSource(newSource as Source);
-    setSources(mockBackend.getSources());
-    setIsRegistering(false);
+    try {
+      await registerSource(newSource as Source);
+      const sc = await fetchSources();
+      setSources(sc);
+      setIsRegistering(false);
+    } catch (err) {
+      console.error(err);
+      setError('No se pudo registrar la fuente');
+    }
   };
 
   const triggerIngestion = (sourceId: string) => {
-    mockBackend.simulateIngestion(sourceId);
+    // ETL se dispara automáticamente al guardar el Excel en la carpeta data/
+    alert(`Para re-ingestar '${sourceId}', guarda el Excel actualizado en la carpeta /backend/data.`);
   };
 
   return (
@@ -71,6 +89,12 @@ export const Home: React.FC = () => {
                 <button type="button" onClick={() => setIsRegistering(false)} className="px-4 py-2 border border-slate-300 rounded-md text-sm">Cancel</button>
               </div>
             </form>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4">
+            {error}
           </div>
         )}
 
