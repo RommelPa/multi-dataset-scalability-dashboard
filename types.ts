@@ -43,8 +43,10 @@ export interface ETLRun {
 
 export interface RealtimeEvent {
   type: 'DATASET_UPDATED' | 'ETL_ERROR';
-  dataset_id: DatasetType;
+  dataset_id: DatasetType | 'balance';
   source_id: string;
-  ts: string;
+  ts?: string;
+  year?: number;
+  warnings?: string[];
   message?: string;
 }
