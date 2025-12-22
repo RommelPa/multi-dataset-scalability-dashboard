@@ -13,7 +13,7 @@ export const BalanceDashboard: React.FC = () => {
   const [years, setYears] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [totals, setTotals] = useState<{regulados: number; libres: number; coes: number; total: number}>({regulados: 0, libres: 0, coes: 0, total: 0});
+  const [totals, setTotals] = useState<{regulados: number; libres: number; coes: number; servicios_aux: number; perdidas: number; total: number}>({regulados: 0, libres: 0, coes: 0, servicios_aux: 0, perdidas: 0, total: 0});
 
   const mainChartRef = useRef<HTMLDivElement>(null);
   const donutChartRef = useRef<HTMLDivElement>(null);
@@ -32,50 +32,89 @@ export const BalanceDashboard: React.FC = () => {
     setError(null);
     try {
       const data = await fetchBalance(year);
-      const totalRegulados = data.regulados.reduce((a, b) => a + b, 0);
-      const totalLibres = data.libres.reduce((a, b) => a + b, 0);
-      const totalCoes = data.coes.reduce((a, b) => a + b, 0);
+      const lastIdx = data.last_month ? data.months.indexOf(data.last_month) : data.month_count - 1;
+      const cutoff = lastIdx >= 0 ? lastIdx + 1 : data.months.length;
+      const sliceTo = Math.min(cutoff, data.months.length);
+
+      const toGwh = (arr: number[]) => arr.slice(0, sliceTo).map(v => Number((v / 1000).toFixed(2)));
+
+      const reguladosGwh = toGwh(data.regulados);
+      const libresGwh = toGwh(data.libres);
+      const coesGwh = toGwh(data.coes);
+      const serviciosAuxGwh = toGwh(data.servicios_aux);
+      const perdidasGwh = toGwh(data.perdidas);
+
+      const totalRegulados = reguladosGwh.reduce((a, b) => a + b, 0);
+      const totalLibres = libresGwh.reduce((a, b) => a + b, 0);
+      const totalCoes = coesGwh.reduce((a, b) => a + b, 0);
+      const totalServiciosAux = serviciosAuxGwh.reduce((a, b) => a + b, 0);
+      const totalPerdidas = perdidasGwh.reduce((a, b) => a + b, 0);
+
       const summaryTotals = {
-        regulados: totalRegulados / 1000,
-        libres: totalLibres / 1000,
-        coes: totalCoes / 1000,
-        total: (totalRegulados + totalLibres + totalCoes) / 1000,
+        regulados: totalRegulados,
+        libres: totalLibres,
+        coes: totalCoes,
+        servicios_aux: totalServiciosAux,
+        perdidas: totalPerdidas,
+        total: totalRegulados + totalLibres + totalCoes,
       };
       setTotals(summaryTotals);
-      
+
+      const stackedMonths = data.months.map(m => m.toUpperCase());
+      const lineTotal = data.regulados.map((_, idx) => Number(((data.regulados[idx] + data.libres[idx] + data.coes[idx]) / 1000).toFixed(2)));
+
       if (mainChartRef.current) {
         const chart = echarts.getInstanceByDom(mainChartRef.current) || echarts.init(mainChartRef.current);
         chart.setOption({
-          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-          legend: { data: ['Regulados', 'Libres', 'COES', 'Total'], bottom: 0 },
-          grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
-          xAxis: { type: 'category', data: data.months },
-          yAxis: { type: 'value', name: 'GWh' },
+          backgroundColor: '#ffffff',
+          tooltip: { 
+            trigger: 'axis', 
+            axisPointer: { type: 'shadow' },
+            formatter: (params: any[]) => {
+              const header = `<div><strong>${data.year} - ${params?.[0]?.axisValue || ''}</strong></div>`;
+              const lines = params.map(p => {
+                const val = Number(p.value).toFixed(1);
+                return `<div><span style="display:inline-block;width:10px;height:10px;background:${p.color};margin-right:6px;border-radius:2px"></span>${p.seriesName}: ${val} GWh</div>`;
+              }).join('');
+              return header + lines;
+            }
+          },
+          legend: { 
+            data: ['Mercado Regulado', 'Mercado Libre', 'COES - SPOT', 'Total'],
+            bottom: 0 
+          },
+          grid: { left: '3%', right: '4%', bottom: '18%', containLabel: true },
+          xAxis: { type: 'category', data: stackedMonths, axisLabel: { fontWeight: 600 } },
+          yAxis: { type: 'value', name: 'GWh', axisLabel: { formatter: (v: number) => v.toFixed(0) } },
           series: [
-            { name: 'Regulados', type: 'bar', stack: 'total', color: '#6366f1', data: data.regulados.map(v => v/1000) },
-            { name: 'Libres', type: 'bar', stack: 'total', color: '#f59e0b', data: data.libres.map(v => v/1000) },
-            { name: 'COES', type: 'bar', stack: 'total', color: '#10b981', data: data.coes.map(v => v/1000) },
-            { name: 'Total', type: 'line', color: '#ef4444', data: data.total.map(v => v/1000), smooth: true }
+            { name: 'Mercado Regulado', type: 'bar', stack: 'total', barWidth: 12, color: '#2563eb', label: { show: true, position: 'insideTop', formatter: '{c}' }, data: data.regulados.map(v => Number((v/1000).toFixed(1))) },
+            { name: 'Mercado Libre', type: 'bar', stack: 'total', barWidth: 12, color: '#f59e0b', label: { show: true, position: 'insideTop', formatter: '{c}' }, data: data.libres.map(v => Number((v/1000).toFixed(1))) },
+            { name: 'COES - SPOT', type: 'bar', stack: 'total', barWidth: 12, color: '#10b981', label: { show: true, position: 'insideTop', formatter: '{c}' }, data: data.coes.map(v => Number((v/1000).toFixed(1))) },
+            { name: 'Total', type: 'line', color: '#0f172a', symbol: 'circle', symbolSize: 8, label: { show: true, position: 'top', formatter: (p: any) => Number(p.value).toFixed(1) }, data: lineTotal, smooth: true }
           ]
         });
       }
-  
+
       if (donutChartRef.current) {
         const chart = echarts.getInstanceByDom(donutChartRef.current) || echarts.init(donutChartRef.current);
         chart.setOption({
+          backgroundColor: '#ffffff',
           tooltip: { trigger: 'item', formatter: '{b}: {c} GWh ({d}%)' },
-          legend: { orient: 'vertical', left: 'left', textStyle: { fontSize: 10 } },
+          legend: { orient: 'vertical', left: 10, top: 20, textStyle: { fontSize: 11 } },
           series: [{
-            name: 'Acumulado Anual',
+            name: 'Acumulado',
             type: 'pie',
-            radius: ['40%', '70%'],
-            avoidLabelOverlap: false,
-            itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
-            label: { show: false },
+            radius: ['45%', '70%'],
+            avoidLabelOverlap: true,
+            itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
+            label: { show: true, formatter: '{b}\\n{d}%' },
+            emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' } },
             data: [
-              { value: summaryTotals.regulados.toFixed(1), name: 'Regulados', itemStyle: { color: '#6366f1' } },
-              { value: summaryTotals.libres.toFixed(1), name: 'Libres', itemStyle: { color: '#f59e0b' } },
-              { value: summaryTotals.coes.toFixed(1), name: 'COES', itemStyle: { color: '#10b981' } }
+              { value: Number(summaryTotals.regulados.toFixed(1)), name: 'Mercado Regulado', itemStyle: { color: '#2563eb' } },
+              { value: Number(summaryTotals.libres.toFixed(1)), name: 'Mercado Libre', itemStyle: { color: '#f59e0b' } },
+              { value: Number(summaryTotals.coes.toFixed(1)), name: 'COES - SPOT', itemStyle: { color: '#10b981' } },
+              { value: Number(summaryTotals.servicios_aux.toFixed(1)), name: 'Servicios Auxiliares', itemStyle: { color: '#8b5cf6' } },
+              { value: Number(summaryTotals.perdidas.toFixed(1)), name: 'Pérdidas', itemStyle: { color: '#94a3b8' } }
             ]
           }]
         });
@@ -200,10 +239,12 @@ export const BalanceDashboard: React.FC = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        <SummaryItem label="Regulados" color="indigo" unit="GWh" value={totals.regulados} />
-        <SummaryItem label="Libres" color="amber" unit="GWh" value={totals.libres} />
-        <SummaryItem label="COES" color="emerald" unit="GWh" value={totals.coes} />
+      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-6">
+        <SummaryItem label="Mercado Regulado" color="indigo" unit="GWh" value={totals.regulados} />
+        <SummaryItem label="Mercado Libre" color="amber" unit="GWh" value={totals.libres} />
+        <SummaryItem label="COES - SPOT" color="emerald" unit="GWh" value={totals.coes} />
+        <SummaryItem label="Servicios Auxiliares" color="violet" unit="GWh" value={totals.servicios_aux} />
+        <SummaryItem label="Pérdidas" color="slate" unit="GWh" value={totals.perdidas} />
         <SummaryItem label="Total" color="red" unit="GWh" value={totals.total} />
       </div>
     </div>
@@ -214,7 +255,7 @@ const SummaryItem: React.FC<{label: string, color: string, value: number, unit: 
   <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
     <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">{label}</div>
     <div className="flex items-baseline gap-2">
-      <span className={`text-2xl font-black text-${color}-600`}>{value.toLocaleString()}</span>
+      <span className={`text-2xl font-black text-${color}-600`}>{value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
       <span className="text-xs text-slate-400 font-medium">{unit}</span>
     </div>
     <div className="mt-4 flex items-center gap-1 text-[10px]">
