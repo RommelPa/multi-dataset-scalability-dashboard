@@ -56,6 +56,9 @@ class BalanceParseResult:
     regulados: List[float]
     libres: List[float]
     coes: List[float]
+    servicios_aux: List[float]
+    perdidas: List[float]
+    observed_months: List[str]
     warnings: List[str]
     source_id: str
 
@@ -121,20 +124,8 @@ def _canonical_header(value: object) -> str:
     return norm
 
 
-def parse_balance_workbook(path: Path, source_id: str = DEFAULT_SOURCE_ID) -> BalanceParseResult:
-    workbook = load_workbook(path, data_only=True)
-    candidate_sheet = None
-    year: Optional[int] = None
-    for sheet in workbook.worksheets:
-        found = _find_title_year(sheet)
-        if found:
-            candidate_sheet = sheet
-            year = found
-            break
-    if not candidate_sheet or not year:
-        raise ValueError("No se encontró un título 'BALANCE DE ENERGÍA EN MWh - AÑO YYYY' en el Excel.")
-
-    df = pd.DataFrame(candidate_sheet.values)
+def _parse_balance_sheet(sheet, year: int, source_id: str) -> BalanceParseResult:
+    df = pd.DataFrame(sheet.values)
     header_idx = None
     for idx, row in df.iterrows():
         normalized = [_canonical_header(v) for v in row.tolist()]
@@ -160,10 +151,13 @@ def parse_balance_workbook(path: Path, source_id: str = DEFAULT_SOURCE_ID) -> Ba
         "regulados": ["a emp. distribuidoras", "distribuidoras"],
         "libres": ["a clientes libres", "clientes libres"],
         "coes": ["coes"],
+        "servicios_aux": ["consumo propio de centrales", "servicios auxiliares"],
+        "perdidas": ["perdidas sistemas transmision", "perdidas", "perdidas sistemas transmisión"],
     }
 
-    series: Dict[str, List[float]] = {"regulados": [], "libres": [], "coes": []}
+    series: Dict[str, List[float]] = {k: [] for k in target_rows}
     warnings: List[str] = []
+    month_presence = [False for _ in month_columns]
 
     for metric, patterns in target_rows.items():
         values_by_month = []
@@ -178,61 +172,103 @@ def parse_balance_workbook(path: Path, source_id: str = DEFAULT_SOURCE_ID) -> Ba
             warnings.append(f"No se encontró fila para '{metric}'.")
             values_by_month = [0.0 for _ in month_columns]
         else:
-            for col in month_columns:
-                values_by_month.append(parse_number(matched_row.get(col)))
+            for midx, col in enumerate(month_columns):
+                raw_value = matched_row.get(col)
+                parsed = parse_number(raw_value)
+                values_by_month.append(parsed)
+                if raw_value not in (None, "", "-") and not (isinstance(raw_value, float) and pd.isna(raw_value)):
+                    month_presence[midx] = month_presence[midx] or parsed != 0
         series[metric] = values_by_month
 
     # align months to standard order
     aligned_months: List[str] = []
-    aligned_reg = []
-    aligned_lib = []
-    aligned_coes = []
+    aligned: Dict[str, List[float]] = {k: [] for k in target_rows}
+    observed_months: List[str] = []
+    last_with_data = -1
+    for midx, present in enumerate(month_presence):
+        if present or any(series[m][midx] != 0 for m in target_rows):
+            last_with_data = midx
+
+    active_month_columns = month_columns if last_with_data < 0 else month_columns[: last_with_data + 1]
+
     for target_month in MONTH_ORDER:
-        if target_month in month_columns:
-            idx = month_columns.index(target_month)
+        if target_month in active_month_columns:
+            idx = active_month_columns.index(target_month)
             aligned_months.append(target_month)
-            aligned_reg.append(series["regulados"][idx])
-            aligned_lib.append(series["libres"][idx])
-            aligned_coes.append(series["coes"][idx])
+            observed_months.append(target_month)
+            for metric in target_rows:
+                aligned[metric].append(series[metric][idx])
         else:
             warnings.append(f"Mes '{target_month}' no encontrado en el archivo. Se usa 0.")
             aligned_months.append(target_month)
-            aligned_reg.append(0.0)
-            aligned_lib.append(0.0)
-            aligned_coes.append(0.0)
+            for metric in target_rows:
+                aligned[metric].append(0.0)
 
     return BalanceParseResult(
         year=year,
         months=aligned_months,
-        regulados=aligned_reg,
-        libres=aligned_lib,
-        coes=aligned_coes,
+        regulados=aligned["regulados"],
+        libres=aligned["libres"],
+        coes=aligned["coes"],
+        servicios_aux=aligned["servicios_aux"],
+        perdidas=aligned["perdidas"],
+        observed_months=observed_months,
         warnings=warnings,
         source_id=source_id,
     )
+
+
+def parse_balance_workbook(path: Path, source_id: str = DEFAULT_SOURCE_ID) -> List[BalanceParseResult]:
+    workbook = load_workbook(path, data_only=True)
+    results: List[BalanceParseResult] = []
+    for sheet in workbook.worksheets:
+        year = _find_title_year(sheet)
+        if not year:
+            continue
+        try:
+            results.append(_parse_balance_sheet(sheet, year, source_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("No se pudo parsear hoja %s (%s): %s", sheet.title, path, exc)
+    if not results:
+        raise ValueError("No se encontró un título 'BALANCE DE ENERGÍA EN MWh - AÑO YYYY' en el Excel.")
+    return results
 
 
 def process_balance_file(path: Path, dispatch_event: Callable[[dict], None], source_id: str = DEFAULT_SOURCE_ID) -> None:
     logger.info("Procesando archivo %s", path)
     warnings: List[str] = []
     try:
-        result = parse_with_retries(path, source_id=source_id)
-        warnings = result.warnings
-        save_balance_rows(result.year, result.source_id, result.months, result.regulados, result.libres, result.coes)
-        upsert_source(result.source_id, "balance", path.name, last_ingested=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        record_etl_run(result.source_id, "balance", "SUCCESS", f"Ingestado año {result.year}", warnings)
-        dispatch_event(
-            {
-                "type": "DATASET_UPDATED",
-                "dataset_id": "balance",
-                "source_id": result.source_id,
-                "year": result.year,
-                "message": f"Balance actualizado para {result.year}",
-                "warnings": warnings,
-            }
-        )
-        if warnings:
-            logger.warning("ETL finalizó con advertencias: %s", warnings)
+        results = parse_with_retries(path, source_id=source_id)
+        run_warnings: List[str] = []
+        first_result = results[0]
+        for result in results:
+            warnings = result.warnings
+            save_balance_rows(
+                result.year,
+                result.source_id,
+                result.months,
+                result.regulados,
+                result.libres,
+                result.coes,
+                result.servicios_aux,
+                result.perdidas,
+                observed_months=result.observed_months,
+            )
+            run_warnings.extend([f"{result.year}: {w}" for w in warnings])
+            dispatch_event(
+                {
+                    "type": "DATASET_UPDATED",
+                    "dataset_id": "balance",
+                    "source_id": result.source_id,
+                    "year": result.year,
+                    "message": f"Balance actualizado para {result.year}",
+                    "warnings": warnings,
+                }
+            )
+        upsert_source(first_result.source_id, "balance", path.name, last_ingested=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        record_etl_run(first_result.source_id, "balance", "SUCCESS", f"Ingestado {len(results)} hojas", run_warnings)
+        if run_warnings:
+            logger.warning("ETL finalizó con advertencias: %s", run_warnings)
     except FileNotFoundError:
         msg = f"Archivo {path} no encontrado. Se omite."
         logger.warning(msg)
@@ -254,7 +290,7 @@ def process_balance_file(path: Path, dispatch_event: Callable[[dict], None], sou
         )
 
 
-def parse_with_retries(path: Path, source_id: str = DEFAULT_SOURCE_ID) -> BalanceParseResult:
+def parse_with_retries(path: Path, source_id: str = DEFAULT_SOURCE_ID) -> List[BalanceParseResult]:
     last_exc: Exception | None = None
     for attempt in range(1, XLSX_RETRY_COUNT + 1):
         try:

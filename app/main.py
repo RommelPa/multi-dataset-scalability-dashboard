@@ -72,7 +72,9 @@ def _seed_if_empty() -> None:
         regulados = [52000 + idx * 500 for idx, _ in enumerate(months)]
         libres = [81000 + idx * 650 for idx, _ in enumerate(months)]
         coes = [9500 + idx * 120 for idx, _ in enumerate(months)]
-        save_balance_rows(year, DEFAULT_SOURCE_ID, months, regulados, libres, coes)
+        servicios_aux = [1500 + idx * 30 for idx, _ in enumerate(months)]
+        perdidas = [2200 + idx * 35 for idx, _ in enumerate(months)]
+        save_balance_rows(year, DEFAULT_SOURCE_ID, months, regulados, libres, coes, servicios_aux, perdidas, observed_months=months)
         upsert_source(DEFAULT_SOURCE_ID, "balance", "sample_balance.xlsx", datetime.utcnow().isoformat())
         _dispatch_event(
             {

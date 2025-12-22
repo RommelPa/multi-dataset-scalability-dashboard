@@ -1,8 +1,8 @@
+import json
 import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
 from typing import Iterable, List
 
 from .config import DB_PATH, DATA_DIR, MONTH_ORDER
@@ -32,6 +32,8 @@ def init_db() -> None:
                 regulados REAL NOT NULL,
                 libres REAL NOT NULL,
                 coes REAL NOT NULL,
+                servicios_aux REAL NOT NULL DEFAULT 0,
+                perdidas REAL NOT NULL DEFAULT 0,
                 total REAL NOT NULL,
                 source_id TEXT NOT NULL DEFAULT 'balance-xlsx',
                 updated_at TEXT NOT NULL,
@@ -39,6 +41,11 @@ def init_db() -> None:
             )
             """
         )
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(balance_monthly)").fetchall()}
+        if "servicios_aux" not in existing_cols:
+            conn.execute("ALTER TABLE balance_monthly ADD COLUMN servicios_aux REAL NOT NULL DEFAULT 0")
+        if "perdidas" not in existing_cols:
+            conn.execute("ALTER TABLE balance_monthly ADD COLUMN perdidas REAL NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sources (
@@ -64,6 +71,19 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS balance_metadata (
+                year INTEGER NOT NULL,
+                source_id TEXT NOT NULL,
+                observed_months TEXT NOT NULL,
+                last_month TEXT,
+                month_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (year, source_id)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -84,14 +104,24 @@ def upsert_source(source_id: str, dataset_id: str, file_name: str | None, last_i
         conn.commit()
 
 
-def save_balance_rows(year: int, source_id: str, months: List[str], regulados: List[float], libres: List[float], coes: List[float]) -> None:
+def save_balance_rows(
+    year: int,
+    source_id: str,
+    months: List[str],
+    regulados: List[float],
+    libres: List[float],
+    coes: List[float],
+    servicios_aux: List[float],
+    perdidas: List[float],
+    observed_months: List[str] | None = None,
+) -> None:
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
         for idx, month in enumerate(months):
             conn.execute(
                 """
-                INSERT OR REPLACE INTO balance_monthly (year, month, regulados, libres, coes, total, source_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO balance_monthly (year, month, regulados, libres, coes, servicios_aux, perdidas, total, source_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     year,
@@ -99,11 +129,28 @@ def save_balance_rows(year: int, source_id: str, months: List[str], regulados: L
                     regulados[idx],
                     libres[idx],
                     coes[idx],
+                    servicios_aux[idx],
+                    perdidas[idx],
                     regulados[idx] + libres[idx] + coes[idx],
                     source_id,
                     now,
                 ),
             )
+        observed = observed_months or months
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO balance_metadata (year, source_id, observed_months, last_month, month_count, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                year,
+                source_id,
+                json.dumps(observed),
+                observed[-1] if observed else None,
+                len(observed),
+                now,
+            ),
+        )
         conn.commit()
 
 
@@ -134,8 +181,13 @@ def fetch_balance_year(year: int, source_id: str | None = None) -> dict:
 
     with get_conn() as conn:
         rows = conn.execute(query, params).fetchall()
+        meta_params = params.copy()
+        metadata = conn.execute(
+            "SELECT observed_months, last_month, month_count FROM balance_metadata WHERE year = ?" + (" AND source_id = ?" if source_id else ""),
+            meta_params,
+        ).fetchone()
 
-    ordered = {m: {"regulados": 0.0, "libres": 0.0, "coes": 0.0, "total": 0.0} for m in MONTH_ORDER}
+    ordered = {m: {"regulados": 0.0, "libres": 0.0, "coes": 0.0, "servicios_aux": 0.0, "perdidas": 0.0, "total": 0.0} for m in MONTH_ORDER}
     for row in rows:
         if row["month"] not in ordered:
             continue
@@ -143,15 +195,30 @@ def fetch_balance_year(year: int, source_id: str | None = None) -> dict:
             "regulados": float(row["regulados"]),
             "libres": float(row["libres"]),
             "coes": float(row["coes"]),
+            "servicios_aux": float(row["servicios_aux"]) if "servicios_aux" in row.keys() else 0.0,
+            "perdidas": float(row["perdidas"]) if "perdidas" in row.keys() else 0.0,
             "total": float(row["total"]),
         }
+
+    observed_months = MONTH_ORDER
+    last_month = MONTH_ORDER[-1]
+    if metadata:
+        observed_months = json.loads(metadata["observed_months"]) if metadata["observed_months"] else MONTH_ORDER
+        last_month = metadata["last_month"] or (observed_months[-1] if observed_months else None)
+    observed_months = [m for m in observed_months if m in MONTH_ORDER]
+    month_count = len(observed_months)
 
     return {
         "year": year,
         "months": MONTH_ORDER,
+        "observed_months": observed_months,
+        "month_count": month_count,
+        "last_month": last_month,
         "regulados": [ordered[m]["regulados"] for m in MONTH_ORDER],
         "libres": [ordered[m]["libres"] for m in MONTH_ORDER],
         "coes": [ordered[m]["coes"] for m in MONTH_ORDER],
+        "servicios_aux": [ordered[m]["servicios_aux"] for m in MONTH_ORDER],
+        "perdidas": [ordered[m]["perdidas"] for m in MONTH_ORDER],
         "total": [ordered[m]["total"] for m in MONTH_ORDER],
     }
 

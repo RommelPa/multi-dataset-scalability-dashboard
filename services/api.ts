@@ -81,9 +81,14 @@ export async function fetchBalanceYears(): Promise<number[]> {
 
 export interface BalanceResponse {
   months: string[];
+  observed_months: string[];
+  month_count: number;
+  last_month?: string;
   regulados: number[];
   libres: number[];
   coes: number[];
+  servicios_aux: number[];
+  perdidas: number[];
   total: number[];
   source_id: string;
   year: number;
