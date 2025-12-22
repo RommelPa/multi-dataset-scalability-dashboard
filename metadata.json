@@ -1,0 +1,7 @@
+{
+  "name": "Multi-Dataset Scalability Dashboard",
+  "description": "A robust dashboard system for testing scalability with energy balance and hydrology datasets. Features pluggable parsers, canonical normalization, and real-time updates.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
