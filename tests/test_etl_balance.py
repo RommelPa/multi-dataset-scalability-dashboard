@@ -87,6 +87,7 @@ class ParseBalanceWorkbookTests(unittest.TestCase):
             "2021-R2",
             "2022",
             "2022-R1",
+            "2022-R2",
             "2023",
             "2023-R1",
             "2024",
@@ -105,11 +106,12 @@ class ParseBalanceWorkbookTests(unittest.TestCase):
         self.assertEqual(candidates[2018].sheet_name, "2018-R2 (LDS)")
         self.assertEqual(candidates[2019].sheet_name, "2019-R2")
         self.assertEqual(candidates[2020].sheet_name, "2020 R2")
+        self.assertEqual(candidates[2022].sheet_name, "2022-R2")
         self.assertEqual(candidates[2025].sheet_name, "2025V1")
         self.assertEqual(candidates[2016].sheet_name, "2016 (rev3)")
 
     @unittest.skipUnless(Workbook and etl, "Dependencias (openpyxl/pandas) no disponibles en el entorno de prueba")
-    def test_coes_taken_from_sale_block_only(self):
+    def test_spot_computed_as_residual(self):
         tmp_dir = Path(self._get_tmp_dir())
         wb = Workbook()
         ws = wb.active
@@ -117,7 +119,7 @@ class ParseBalanceWorkbookTests(unittest.TestCase):
         ws["A1"] = "BALANCE DE ENERGÍA EN MWh - AÑO 2019"
         ws.append([])
         ws.append(["DESCRIPCIÓN", "Enero", "Febrero", "Marzo", "Acumulado"])
-        ws.append(["Venta de energía", None, None, None, None])
+        ws.append(["Venta de energía", 90, 92, 95, 277])
         ws.append(["A emp. Distribuidoras", 10, 11, 12, 33])
         ws.append(["A clientes Libres", 20, 21, 22, 63])
         ws.append(["COES", 50, 60, 70, 180])
@@ -131,7 +133,7 @@ class ParseBalanceWorkbookTests(unittest.TestCase):
             excel_path = Path(tmp.name)
 
         result = next(r for r in etl.parse_balance_workbook(excel_path) if r.year == 2019)
-        self.assertEqual(result.energy.coes[:3], [50.0, 60.0, 70.0])
+        self.assertEqual(result.energy.coes[:3], [60.0, 60.0, 61.0])
         self.assertEqual(result.energy.regulados[:2], [10.0, 11.0])
         self.assertEqual(result.energy.libres[:2], [20.0, 21.0])
         self.assertTrue(result.energy.perdidas[0] > 0)
