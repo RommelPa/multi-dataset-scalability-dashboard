@@ -11,7 +11,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import ALLOWED_ORIGINS, DATA_DIR, DEFAULT_SOURCE_ID, MONTH_ORDER
-from .db import fetch_balance_year, init_db, list_balance_years, list_sources, save_balance_rows, upsert_source
+from .db import (
+    fetch_balance_overview,
+    fetch_balance_year,
+    init_db,
+    list_balance_years,
+    list_sources,
+    save_balance_rows,
+    save_balance_sales_rows,
+    upsert_source,
+)
 from .etl import start_watcher
 
 logging.basicConfig(
@@ -74,7 +83,23 @@ def _seed_if_empty() -> None:
         coes = [9500 + idx * 120 for idx, _ in enumerate(months)]
         servicios_aux = [1500 + idx * 30 for idx, _ in enumerate(months)]
         perdidas = [2200 + idx * 35 for idx, _ in enumerate(months)]
-        save_balance_rows(year, DEFAULT_SOURCE_ID, months, regulados, libres, coes, servicios_aux, perdidas, observed_months=months)
+        save_balance_rows(
+            year,
+            DEFAULT_SOURCE_ID,
+            months,
+            regulados,
+            libres,
+            coes,
+            servicios_aux,
+            perdidas,
+            observed_months=months,
+            last_month=months[-1],
+        )
+        sales_reg = [round((val / 1000) * 4.2, 2) for val in regulados]
+        sales_lib = [round((val / 1000) * 3.8, 2) for val in libres]
+        sales_coes = [round((val / 1000) * 1.1, 2) for val in coes]
+        otros = [500.0 for _ in months]
+        save_balance_sales_rows(year, DEFAULT_SOURCE_ID, months, sales_reg, sales_lib, sales_coes, otros)
         upsert_source(DEFAULT_SOURCE_ID, "balance", "sample_balance.xlsx", datetime.utcnow().isoformat())
         _dispatch_event(
             {
@@ -116,12 +141,21 @@ async def get_balance_years():
     return {"years": list_balance_years()}
 
 
+@app.get("/api/balance/overview")
+async def get_balance_overview():
+    payload = fetch_balance_overview()
+    payload["source_id"] = DEFAULT_SOURCE_ID
+    return payload
+
+
 @app.get("/api/balance/{year}")
 async def get_balance_for_year(year: int):
     years = list_balance_years()
     if year not in years:
         raise HTTPException(status_code=404, detail=f"No existe data para el año {year}")
     data = fetch_balance_year(year)
+    data["venta_energia"] = [reg + lib for reg, lib in zip(data["regulados"], data["libres"])]
+    data["total_mercados"] = [reg + lib + coe for reg, lib, coe in zip(data["regulados"], data["libres"], data["coes"])]
     data["source_id"] = DEFAULT_SOURCE_ID
     return data
 

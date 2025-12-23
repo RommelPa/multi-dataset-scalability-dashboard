@@ -84,6 +84,22 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS balance_sales_monthly (
+                year INTEGER NOT NULL,
+                month TEXT NOT NULL,
+                regulados REAL NOT NULL DEFAULT 0,
+                libres REAL NOT NULL DEFAULT 0,
+                coes REAL NOT NULL DEFAULT 0,
+                otros REAL NOT NULL DEFAULT 0,
+                total REAL NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT 'balance-xlsx',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (year, month, source_id)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -114,6 +130,7 @@ def save_balance_rows(
     servicios_aux: List[float],
     perdidas: List[float],
     observed_months: List[str] | None = None,
+    last_month: str | None = None,
 ) -> None:
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
@@ -137,6 +154,8 @@ def save_balance_rows(
                 ),
             )
         observed = observed_months or months
+        observed = [m for m in observed if m in MONTH_ORDER]
+        resolved_last_month = last_month or (observed[-1] if observed else None)
         conn.execute(
             """
             INSERT OR REPLACE INTO balance_metadata (year, source_id, observed_months, last_month, month_count, updated_at)
@@ -146,7 +165,7 @@ def save_balance_rows(
                 year,
                 source_id,
                 json.dumps(observed),
-                observed[-1] if observed else None,
+                resolved_last_month,
                 len(observed),
                 now,
             ),
@@ -170,6 +189,39 @@ def list_balance_years() -> list[int]:
     with get_conn() as conn:
         rows = conn.execute("SELECT DISTINCT year FROM balance_monthly ORDER BY year").fetchall()
         return [int(r["year"]) for r in rows]
+
+
+def save_balance_sales_rows(
+    year: int,
+    source_id: str,
+    months: List[str],
+    regulados: List[float],
+    libres: List[float],
+    coes_spot: List[float],
+    otros: List[float],
+) -> None:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        for idx, month in enumerate(months):
+            total = regulados[idx] + libres[idx] + coes_spot[idx] + otros[idx]
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO balance_sales_monthly (year, month, regulados, libres, coes, otros, total, source_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    year,
+                    month,
+                    regulados[idx],
+                    libres[idx],
+                    coes_spot[idx],
+                    otros[idx],
+                    total,
+                    source_id,
+                    now,
+                ),
+            )
+        conn.commit()
 
 
 def fetch_balance_year(year: int, source_id: str | None = None) -> dict:
@@ -220,6 +272,116 @@ def fetch_balance_year(year: int, source_id: str | None = None) -> dict:
         "servicios_aux": [ordered[m]["servicios_aux"] for m in MONTH_ORDER],
         "perdidas": [ordered[m]["perdidas"] for m in MONTH_ORDER],
         "total": [ordered[m]["total"] for m in MONTH_ORDER],
+    }
+
+
+def fetch_balance_sales_year(year: int, source_id: str | None = None) -> dict:
+    params: list = [year]
+    query = "SELECT * FROM balance_sales_monthly WHERE year = ?"
+    if source_id:
+        query += " AND source_id = ?"
+        params.append(source_id)
+
+    with get_conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    ordered = {m: {"regulados": 0.0, "libres": 0.0, "coes": 0.0, "otros": 0.0, "total": 0.0} for m in MONTH_ORDER}
+    for row in rows:
+        if row["month"] not in ordered:
+            continue
+        ordered[row["month"]] = {
+            "regulados": float(row["regulados"]),
+            "libres": float(row["libres"]),
+            "coes": float(row["coes"]),
+            "otros": float(row["otros"]),
+            "total": float(row["total"]),
+        }
+    return {
+        "year": year,
+        "months": MONTH_ORDER,
+        "regulados": [ordered[m]["regulados"] for m in MONTH_ORDER],
+        "libres": [ordered[m]["libres"] for m in MONTH_ORDER],
+        "coes": [ordered[m]["coes"] for m in MONTH_ORDER],
+        "otros": [ordered[m]["otros"] for m in MONTH_ORDER],
+        "total": [ordered[m]["total"] for m in MONTH_ORDER],
+    }
+
+
+def fetch_balance_overview(source_id: str | None = None) -> dict:
+    years = list_balance_years()
+    if not years:
+        return {
+            "years": [],
+            "energy_points": [],
+            "sales_points": [],
+            "last_year": None,
+            "last_month": None,
+        }
+
+    energy_points = []
+    sales_points = []
+
+    for year in years:
+        year_data = fetch_balance_year(year, source_id=source_id)
+        observed = set(year_data.get("observed_months") or MONTH_ORDER)
+        for idx, month in enumerate(year_data["months"]):
+            if month not in observed:
+                continue
+            label = f\"{month}-{str(year)[-2:]}\"
+            period_key = f\"{year}-{idx + 1:02d}\"
+            regulados = year_data["regulados"][idx]
+            libres = year_data["libres"][idx]
+            coes = year_data["coes"][idx]
+            perdidas = year_data["perdidas"][idx]
+            servicios_aux = year_data["servicios_aux"][idx]
+            energy_points.append(
+                {
+                    "year": year,
+                    "month": month,
+                    "period": period_key,
+                    "label": label,
+                    "regulados_mwh": regulados,
+                    "libres_mwh": libres,
+                    "coes_mwh": coes,
+                    "perdidas_mwh": perdidas,
+                    "servicios_aux_mwh": servicios_aux,
+                    "venta_energia_mwh": regulados + libres,
+                    "total_mercados_mwh": regulados + libres + coes,
+                }
+            )
+
+        sales_data = fetch_balance_sales_year(year, source_id=source_id)
+        sales_observed = {MONTH_ORDER[idx] for idx, val in enumerate(sales_data["total"]) if val != 0}
+        for idx, month in enumerate(sales_data["months"]):
+            if sales_observed and month not in sales_observed:
+                continue
+            label = f\"{month}-{str(year)[-2:]}\"
+            period_key = f\"{year}-{idx + 1:02d}\"
+            sales_points.append(
+                {
+                    "year": year,
+                    "month": month,
+                    "period": period_key,
+                    "label": label,
+                    "regulados": sales_data["regulados"][idx],
+                    "libres": sales_data["libres"][idx],
+                    "coes_spot": sales_data["coes"][idx],
+                    "otros": sales_data["otros"][idx],
+                    "total": sales_data["total"][idx],
+                }
+            )
+
+    last_year = years[-1]
+    last_year_data = fetch_balance_year(last_year, source_id=source_id)
+    last_month = last_year_data.get("last_month") or MONTH_ORDER[-1]
+
+    return {
+        "years": years,
+        "energy_points": energy_points,
+        "sales_points": sales_points,
+        "last_year": last_year,
+        "last_month": last_month,
+        "warnings": [],
     }
 
 

@@ -1,4 +1,4 @@
-import { DatasetType, RealtimeEvent, Source } from '../types';
+import { BalanceEnergyPoint, BalanceOverviewResponse, BalanceSalesPoint, DatasetType, RealtimeEvent, Source } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
@@ -92,11 +92,19 @@ export interface BalanceResponse {
   total: number[];
   source_id: string;
   year: number;
+  venta_energia?: number[];
+  total_mercados?: number[];
   warnings?: string[];
 }
 
 export async function fetchBalance(year: number): Promise<BalanceResponse> {
   const resp = await fetch(`${API_BASE}/api/balance/${year}`);
   if (!resp.ok) throw new Error(`No se pudo obtener balance ${year}`);
+  return resp.json();
+}
+
+export async function fetchBalanceOverview(): Promise<BalanceOverviewResponse> {
+  const resp = await fetch(`${API_BASE}/api/balance/overview`);
+  if (!resp.ok) throw new Error("No se pudo obtener el balance consolidado");
   return resp.json();
 }
