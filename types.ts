@@ -50,3 +50,39 @@ export interface RealtimeEvent {
   warnings?: string[];
   message?: string;
 }
+
+export interface BalanceEnergyPoint {
+  year: number;
+  month: string;
+  period: string;
+  label: string;
+  regulados_mwh: number;
+  libres_mwh: number;
+  coes_mwh: number;
+  perdidas_mwh: number;
+  servicios_aux_mwh: number;
+  venta_energia_mwh: number;
+  total_mercados_mwh: number;
+}
+
+export interface BalanceSalesPoint {
+  year: number;
+  month: string;
+  period: string;
+  label: string;
+  regulados: number;
+  libres: number;
+  coes_spot: number;
+  otros: number;
+  total: number;
+}
+
+export interface BalanceOverviewResponse {
+  years: number[];
+  last_year: number | null;
+  last_month: string | null;
+  source_id: string;
+  energy_points: BalanceEnergyPoint[];
+  sales_points: BalanceSalesPoint[];
+  warnings?: string[];
+}

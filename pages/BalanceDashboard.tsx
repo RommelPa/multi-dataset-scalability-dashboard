@@ -1,180 +1,236 @@
-
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Legend,
+  Line,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  Cell,
+} from 'recharts';
 import { ChartCard } from '../components/ChartCard';
-import { fetchBalance, fetchBalanceYears, fetchSources, subscribeToEvents } from '../services/api';
-import { DatasetType, Source } from '../types';
+import {
+  BalanceEnergyPoint,
+  BalanceOverviewResponse,
+  BalanceSalesPoint,
+  DatasetType,
+  Source,
+} from '../types';
+import { fetchBalanceOverview, fetchSources, subscribeToEvents } from '../services/api';
 
-declare const echarts: any;
+const MONTH_ORDER = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Set', 'Oct', 'Nov', 'Dic'];
 
-export const BalanceDashboard: React.FC = () => {
+const ENERGY_COLORS = {
+  regulados: '#1d4ed8',
+  libres: '#f97316',
+  coes: '#10b981',
+  total: '#cbd5e1',
+};
+
+const STACKED_COLORS = {
+  regulados: '#ef4444',
+  libres: '#22c55e',
+  coes: '#2563eb',
+  total: '#0d9488',
+};
+
+const SALES_COLORS = {
+  regulados: '#16a34a',
+  libres: '#ef4444',
+  coes: '#facc15',
+  otros: '#8b5cf6',
+  total: '#e2e8f0',
+};
+
+type EnergyRow = BalanceEnergyPoint & {
+  regulados: number;
+  libres: number;
+  coes: number;
+  perdidas: number;
+  servicios_aux: number;
+  ventaEnergia: number;
+  totalMercados: number;
+};
+
+type SalesRow = BalanceSalesPoint;
+
+const monthIndex = (month: string) => MONTH_ORDER.indexOf(month);
+
+const formatNumber = (value: number, decimals = 1) =>
+  value.toLocaleString('es-PE', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+
+const BalanceDashboard: React.FC = () => {
+  const [overview, setOverview] = useState<BalanceOverviewResponse | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
-  const [selectedSource, setSelectedSource] = useState<string>('');
-  const [year, setYear] = useState<number>(new Date().getFullYear());
-  const [years, setYears] = useState<number[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [selectedSource, setSelectedSource] = useState<string>('balance-xlsx');
+  const [selectedMonthKey, setSelectedMonthKey] = useState<string>('');
+  const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [totals, setTotals] = useState<{regulados: number; libres: number; coes: number; servicios_aux: number; perdidas: number; total: number}>({regulados: 0, libres: 0, coes: 0, servicios_aux: 0, perdidas: 0, total: 0});
 
-  const mainChartRef = useRef<HTMLDivElement>(null);
-  const donutChartRef = useRef<HTMLDivElement>(null);
-
-  const refreshYears = useCallback(async () => {
-    try {
-      const availableYears = await fetchBalanceYears();
-      setYears(availableYears);
-    } catch (err) {
-      console.error(err);
-    }
-  }, []);
-
-  const refreshData = useCallback(async () => {
+  const loadData = async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchBalance(year);
-      const lastIdx = data.last_month ? data.months.indexOf(data.last_month) : data.month_count - 1;
-      const cutoff = lastIdx >= 0 ? lastIdx + 1 : data.months.length;
-      const sliceTo = Math.min(cutoff, data.months.length);
-
-      const toGwh = (arr: number[]) => arr.slice(0, sliceTo).map(v => Number((v / 1000).toFixed(2)));
-
-      const reguladosGwh = toGwh(data.regulados);
-      const libresGwh = toGwh(data.libres);
-      const coesGwh = toGwh(data.coes);
-      const serviciosAuxGwh = toGwh(data.servicios_aux);
-      const perdidasGwh = toGwh(data.perdidas);
-
-      const totalRegulados = reguladosGwh.reduce((a, b) => a + b, 0);
-      const totalLibres = libresGwh.reduce((a, b) => a + b, 0);
-      const totalCoes = coesGwh.reduce((a, b) => a + b, 0);
-      const totalServiciosAux = serviciosAuxGwh.reduce((a, b) => a + b, 0);
-      const totalPerdidas = perdidasGwh.reduce((a, b) => a + b, 0);
-
-      const summaryTotals = {
-        regulados: totalRegulados,
-        libres: totalLibres,
-        coes: totalCoes,
-        servicios_aux: totalServiciosAux,
-        perdidas: totalPerdidas,
-        total: totalRegulados + totalLibres + totalCoes,
-      };
-      setTotals(summaryTotals);
-
-      const stackedMonths = data.months.map(m => m.toUpperCase());
-      const lineTotal = data.regulados.map((_, idx) => Number(((data.regulados[idx] + data.libres[idx] + data.coes[idx]) / 1000).toFixed(2)));
-
-      if (mainChartRef.current) {
-        const chart = echarts.getInstanceByDom(mainChartRef.current) || echarts.init(mainChartRef.current);
-        chart.setOption({
-          backgroundColor: '#ffffff',
-          tooltip: { 
-            trigger: 'axis', 
-            axisPointer: { type: 'shadow' },
-            formatter: (params: any[]) => {
-              const header = `<div><strong>${data.year} - ${params?.[0]?.axisValue || ''}</strong></div>`;
-              const lines = params.map(p => {
-                const val = Number(p.value).toFixed(1);
-                return `<div><span style="display:inline-block;width:10px;height:10px;background:${p.color};margin-right:6px;border-radius:2px"></span>${p.seriesName}: ${val} GWh</div>`;
-              }).join('');
-              return header + lines;
-            }
-          },
-          legend: { 
-            data: ['Mercado Regulado', 'Mercado Libre', 'COES - SPOT', 'Total'],
-            bottom: 0 
-          },
-          grid: { left: '3%', right: '4%', bottom: '18%', containLabel: true },
-          xAxis: { type: 'category', data: stackedMonths, axisLabel: { fontWeight: 600 } },
-          yAxis: { type: 'value', name: 'GWh', axisLabel: { formatter: (v: number) => v.toFixed(0) } },
-          series: [
-            { name: 'Mercado Regulado', type: 'bar', stack: 'total', barWidth: 12, color: '#2563eb', label: { show: true, position: 'insideTop', formatter: '{c}' }, data: data.regulados.map(v => Number((v/1000).toFixed(1))) },
-            { name: 'Mercado Libre', type: 'bar', stack: 'total', barWidth: 12, color: '#f59e0b', label: { show: true, position: 'insideTop', formatter: '{c}' }, data: data.libres.map(v => Number((v/1000).toFixed(1))) },
-            { name: 'COES - SPOT', type: 'bar', stack: 'total', barWidth: 12, color: '#10b981', label: { show: true, position: 'insideTop', formatter: '{c}' }, data: data.coes.map(v => Number((v/1000).toFixed(1))) },
-            { name: 'Total', type: 'line', color: '#0f172a', symbol: 'circle', symbolSize: 8, label: { show: true, position: 'top', formatter: (p: any) => Number(p.value).toFixed(1) }, data: lineTotal, smooth: true }
-          ]
-        });
-      }
-
-      if (donutChartRef.current) {
-        const chart = echarts.getInstanceByDom(donutChartRef.current) || echarts.init(donutChartRef.current);
-        chart.setOption({
-          backgroundColor: '#ffffff',
-          tooltip: { trigger: 'item', formatter: '{b}: {c} GWh ({d}%)' },
-          legend: { orient: 'vertical', left: 10, top: 20, textStyle: { fontSize: 11 } },
-          series: [{
-            name: 'Acumulado',
-            type: 'pie',
-            radius: ['45%', '70%'],
-            avoidLabelOverlap: true,
-            itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
-            label: { show: true, formatter: '{b}\\n{d}%' },
-            emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' } },
-            data: [
-              { value: Number(summaryTotals.regulados.toFixed(1)), name: 'Mercado Regulado', itemStyle: { color: '#2563eb' } },
-              { value: Number(summaryTotals.libres.toFixed(1)), name: 'Mercado Libre', itemStyle: { color: '#f59e0b' } },
-              { value: Number(summaryTotals.coes.toFixed(1)), name: 'COES - SPOT', itemStyle: { color: '#10b981' } },
-              { value: Number(summaryTotals.servicios_aux.toFixed(1)), name: 'Servicios Auxiliares', itemStyle: { color: '#8b5cf6' } },
-              { value: Number(summaryTotals.perdidas.toFixed(1)), name: 'Pérdidas', itemStyle: { color: '#94a3b8' } }
-            ]
-          }]
-        });
+      const [sourceList, data] = await Promise.all([fetchSources(), fetchBalanceOverview()]);
+      const balanceSources = sourceList.filter((s) => s.dataset_id === DatasetType.BALANCE);
+      setSources(balanceSources);
+      setSelectedSource(balanceSources[0]?.source_id || data.source_id || 'balance-xlsx');
+      setOverview(data);
+      if (data.last_year && data.last_month) {
+        const monthIdx = monthIndex(data.last_month);
+        setSelectedMonthKey(`${data.last_year}-${String(monthIdx + 1).padStart(2, '0')}`);
       }
     } catch (err) {
       console.error(err);
-      setError('No se pudo obtener los datos del año seleccionado');
+      setError('No se pudo cargar el balance de energía');
     } finally {
       setLoading(false);
     }
-  }, [year]);
+  };
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [apiSources, availableYears] = await Promise.all([fetchSources(), fetchBalanceYears()]);
-        const balanceSources = apiSources.filter(src => src.dataset_id === DatasetType.BALANCE);
-        setSources(balanceSources);
-        if (balanceSources.length > 0) {
-          setSelectedSource(balanceSources[0].source_id);
-        } else {
-          setSelectedSource('balance-xlsx');
-        }
-        setYears(availableYears);
-        if (availableYears.length > 0) {
-          setYear(availableYears[availableYears.length - 1]);
-        }
-      } catch (err) {
-        console.error(err);
-        setError('No se pudo cargar configuración inicial');
-      }
-    };
-    load();
+    loadData();
   }, []);
 
   useEffect(() => {
-    if (!selectedSource) return;
-    refreshData();
-  }, [selectedSource, year]);
-
-  useEffect(() => {
     const unsubscribe = subscribeToEvents((event) => {
-      if (event.type === 'DATASET_UPDATED' && event.dataset_id === DatasetType.BALANCE) {
-        refreshData();
-        refreshYears();
+      if (event.dataset_id === DatasetType.BALANCE) {
+        loadData();
       }
     });
     return () => unsubscribe();
-  }, [refreshData, refreshYears]);
+  }, []);
 
-  const handleExport = (ref: React.RefObject<HTMLDivElement>, name: string) => {
-    if (!ref.current) return;
-    const chart = echarts.getInstanceByDom(ref.current);
-    if (!chart) return;
-    const url = chart.getDataURL({ pixelRatio: 2, backgroundColor: '#fff' });
-    const link = document.createElement('a');
-    link.download = `${name}-${selectedSource}-${year}.png`;
-    link.href = url;
-    link.click();
-  };
+  const energyData: EnergyRow[] = useMemo(() => {
+    if (!overview) return [];
+    const sorted = [...overview.energy_points].sort((a, b) => {
+      if (a.year === b.year) return monthIndex(a.month) - monthIndex(b.month);
+      return a.year - b.year;
+    });
+    return sorted.map((row) => ({
+      ...row,
+      regulados: row.regulados_mwh / 1000,
+      libres: row.libres_mwh / 1000,
+      coes: row.coes_mwh / 1000,
+      perdidas: row.perdidas_mwh / 1000,
+      servicios_aux: row.servicios_aux_mwh / 1000,
+      ventaEnergia: row.venta_energia_mwh / 1000,
+      totalMercados: row.total_mercados_mwh / 1000,
+    }));
+  }, [overview]);
+
+  const salesData: SalesRow[] = useMemo(() => {
+    if (!overview) return [];
+    const sorted = [...overview.sales_points].sort((a, b) => {
+      if (a.year === b.year) return monthIndex(a.month) - monthIndex(b.month);
+      return a.year - b.year;
+    });
+    return sorted;
+  }, [overview]);
+
+  const donutPoint = useMemo(() => {
+    if (!overview || !selectedMonthKey) return null;
+    const point = energyData.find((p) => p.period === selectedMonthKey);
+    return point || null;
+  }, [energyData, overview, selectedMonthKey]);
+
+  const donutOptions = useMemo(() => {
+    if (!overview) return [];
+    return energyData
+      .filter((p) => p.year === overview.last_year)
+      .map((p) => ({ key: p.period, label: `${p.month}-${p.year}` }));
+  }, [energyData, overview]);
+
+  const totalVentaEnergia = useMemo(() => energyData.reduce((sum, row) => sum + row.ventaEnergia, 0), [energyData]);
+  const totalMercados = useMemo(() => energyData.reduce((sum, row) => sum + row.totalMercados, 0), [energyData]);
+
+  const renderEnergyTable = () => (
+    <div className="overflow-x-auto mt-4">
+      <table className="min-w-full text-xs">
+        <thead className="bg-slate-50">
+          <tr>
+            <th className="px-2 py-1 text-left text-slate-600">Mes</th>
+            <th className="px-2 py-1 text-left">Regulados</th>
+            <th className="px-2 py-1 text-left">Libres</th>
+            <th className="px-2 py-1 text-left">COES-SPOT</th>
+            <th className="px-2 py-1 text-left">Total mercados</th>
+          </tr>
+        </thead>
+        <tbody>
+          {energyData.map((row) => (
+            <tr key={row.period} className="border-b border-slate-100">
+              <td className="px-2 py-1 font-semibold text-slate-700">{row.label}</td>
+              <td className="px-2 py-1">{formatNumber(row.regulados)}</td>
+              <td className="px-2 py-1">{formatNumber(row.libres)}</td>
+              <td className="px-2 py-1">{formatNumber(row.coes)}</td>
+              <td className="px-2 py-1 font-semibold">{formatNumber(row.totalMercados)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const renderStackedTable = () => (
+    <div className="overflow-x-auto mt-4">
+      <table className="min-w-full text-xs">
+        <thead className="bg-slate-50">
+          <tr>
+            <th className="px-2 py-1 text-left text-slate-600">Mes</th>
+            <th className="px-2 py-1 text-left">Mercado Regulado</th>
+            <th className="px-2 py-1 text-left">Mercado Libre</th>
+            <th className="px-2 py-1 text-left">Mercado Spot-COES</th>
+            <th className="px-2 py-1 text-left">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {energyData.map((row) => (
+            <tr key={row.period} className="border-b border-slate-100">
+              <td className="px-2 py-1 font-semibold text-slate-700">{row.label}</td>
+              <td className="px-2 py-1">{formatNumber(row.regulados)}</td>
+              <td className="px-2 py-1">{formatNumber(row.libres)}</td>
+              <td className="px-2 py-1">{formatNumber(row.coes)}</td>
+              <td className="px-2 py-1 font-semibold">{formatNumber(row.totalMercados)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const renderSalesTable = () => (
+    <div className="overflow-x-auto mt-4">
+      <table className="min-w-full text-xs">
+        <thead className="bg-slate-50">
+          <tr>
+            <th className="px-2 py-1 text-left text-slate-600">Mes</th>
+            <th className="px-2 py-1 text-left">Regulados</th>
+            <th className="px-2 py-1 text-left">Libres</th>
+            <th className="px-2 py-1 text-left">COES-SPOT</th>
+            <th className="px-2 py-1 text-left">Otros</th>
+            <th className="px-2 py-1 text-left">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {salesData.map((row) => (
+            <tr key={row.period} className="border-b border-slate-100">
+              <td className="px-2 py-1 font-semibold text-slate-700">{row.label}</td>
+              <td className="px-2 py-1">{formatNumber(row.regulados, 2)}</td>
+              <td className="px-2 py-1">{formatNumber(row.libres, 2)}</td>
+              <td className="px-2 py-1">{formatNumber(row.coes_spot, 2)}</td>
+              <td className="px-2 py-1">{formatNumber(row.otros, 2)}</td>
+              <td className="px-2 py-1 font-semibold">{formatNumber(row.total, 2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -185,82 +241,180 @@ export const BalanceDashboard: React.FC = () => {
           </div>
           <div>
             <h1 className="text-xl font-bold text-slate-900">Balance de Energía</h1>
-            <p className="text-xs text-slate-500 uppercase font-semibold">GWh Multi-Market Analytics</p>
+            <p className="text-xs text-slate-500 uppercase font-semibold">GWh por mercados (2016-2025)</p>
           </div>
         </div>
-        <div className="flex gap-3">
-          <select 
-            value={selectedSource} 
+        <div className="flex flex-wrap gap-2 items-center">
+          <label className="text-xs text-slate-500 font-semibold">Fuente</label>
+          <select
+            value={selectedSource}
             onChange={(e) => setSelectedSource(e.target.value)}
             className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
           >
-            {sources.length === 0 && <option value="balance-xlsx">balance-xlsx</option>}
-            {sources.map(s => <option key={s.source_id} value={s.source_id}>{s.source_id}</option>)}
+            {(sources.length === 0 ? [{ source_id: selectedSource }] : sources).map((s) => (
+              <option key={s.source_id} value={s.source_id}>{s.source_id}</option>
+            ))}
           </select>
-          <select 
-            value={year} 
-            onChange={(e) => setYear(Number(e.target.value))}
-            className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-          >
-            {(years.length === 0 ? [year] : years).map(y => <option key={y} value={y}>{y}</option>)}
-          </select>
-          <button 
-            onClick={refreshData}
-            className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-            title="Refresh"
-          >
-            <svg className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
-          <ChartCard 
-            title="Evolución Mensual de Ventas" 
-            onExport={() => handleExport(mainChartRef, 'balance-monthly')}
-          >
-            <div ref={mainChartRef} className="w-full h-[400px]"></div>
-          </ChartCard>
-        </div>
-        <div>
-          <ChartCard 
-            title="Distribución Acumulada" 
-            onExport={() => handleExport(donutChartRef, 'balance-donut')}
-          >
-            <div ref={donutChartRef} className="w-full h-[400px]"></div>
-          </ChartCard>
+          <div className="text-xs text-slate-400">{loading ? 'Actualizando…' : 'Actualizado'}</div>
         </div>
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
-          {error}
-        </div>
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">{error}</div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-6">
-        <SummaryItem label="Mercado Regulado" color="indigo" unit="GWh" value={totals.regulados} />
-        <SummaryItem label="Mercado Libre" color="amber" unit="GWh" value={totals.libres} />
-        <SummaryItem label="COES - SPOT" color="emerald" unit="GWh" value={totals.coes} />
-        <SummaryItem label="Servicios Auxiliares" color="violet" unit="GWh" value={totals.servicios_aux} />
-        <SummaryItem label="Pérdidas" color="slate" unit="GWh" value={totals.perdidas} />
-        <SummaryItem label="Total" color="red" unit="GWh" value={totals.total} />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-xs font-bold text-slate-400 uppercase">Venta de Energía oficial</div>
+          <div className="text-3xl font-black text-slate-800 mt-2">{formatNumber(totalVentaEnergia, 1)} GWh</div>
+          <p className="text-xs text-slate-500 mt-1">VentaEnergía = A emp. Distribuidoras + A clientes Libres</p>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-xs font-bold text-slate-400 uppercase">Total mercados (Reg+Lib+COES)</div>
+          <div className="text-3xl font-black text-slate-800 mt-2">{formatNumber(totalMercados, 1)} GWh</div>
+          <p className="text-xs text-slate-500 mt-1">Usado en los gráficos apilados con línea y barras con TOTAL de fondo</p>
+        </div>
       </div>
+
+      <ChartCard title="Ventas de energía por mercados (GWh)">
+        <div className="h-[360px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={energyData} barCategoryGap="25%" barGap={-12}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="label" />
+              <YAxis tickFormatter={(v) => `${v}`} label={{ value: 'GWh', angle: -90, position: 'insideLeft' }} />
+              <Tooltip
+                formatter={(value: number) => `${formatNumber(value as number)} GWh`}
+                labelFormatter={(label) => `Mes: ${label}`}
+              />
+              <Legend />
+              <Bar dataKey="totalMercados" name="TOTAL" fill={ENERGY_COLORS.total} barSize={38} radius={[6, 6, 0, 0]} />
+              <Bar dataKey="regulados" name="REGULADOS" stackId="markets" fill={ENERGY_COLORS.regulados} barSize={24} radius={[6, 6, 0, 0]} />
+              <Bar dataKey="libres" name="LIBRES" stackId="markets" fill={ENERGY_COLORS.libres} barSize={24} radius={[6, 6, 0, 0]} />
+              <Bar dataKey="coes" name="COES-SPOT" stackId="markets" fill={ENERGY_COLORS.coes} barSize={24} radius={[6, 6, 0, 0]} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        {renderEnergyTable()}
+      </ChartCard>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <ChartCard title="Balance de Energía (MWh) - Donut por mes">
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap gap-2 items-center">
+              <label className="text-xs font-semibold text-slate-500">Mes:</label>
+              <select
+                value={selectedMonthKey}
+                onChange={(e) => setSelectedMonthKey(e.target.value)}
+                className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+              >
+                {donutOptions.map((opt) => (
+                  <option key={opt.key} value={opt.key}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="h-[320px]">
+              {donutPoint ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Tooltip formatter={(value: number) => `${formatNumber(value as number, 0)} MWh`} />
+                    <Pie
+                      data={[
+                        { name: 'Mercado Regulado', value: donutPoint.regulados_mwh },
+                        { name: 'Mercado Libre', value: donutPoint.libres_mwh },
+                        { name: 'COES', value: donutPoint.coes_mwh },
+                        { name: 'Pérdidas', value: donutPoint.perdidas_mwh },
+                        { name: 'Servicios Auxiliares', value: donutPoint.servicios_aux_mwh },
+                      ]}
+                      dataKey="value"
+                      nameKey="name"
+                      innerRadius={70}
+                      outerRadius={110}
+                      label={(entry) => {
+                        const total =
+                          donutPoint.regulados_mwh +
+                          donutPoint.libres_mwh +
+                          donutPoint.coes_mwh +
+                          donutPoint.perdidas_mwh +
+                          donutPoint.servicios_aux_mwh;
+                        const pct = total ? Math.round((entry.value / total) * 100) : 0;
+                        return `${entry.name}; ${formatNumber(entry.value, 0)}; ${pct}%`;
+                      }}
+                      labelLine={false}
+                    >
+                      <Cell fill={ENERGY_COLORS.regulados} />
+                      <Cell fill={ENERGY_COLORS.libres} />
+                      <Cell fill={ENERGY_COLORS.coes} />
+                      <Cell fill="#94a3b8" />
+                      <Cell fill="#8b5cf6" />
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex items-center justify-center text-slate-400 text-sm">Sin datos para el mes seleccionado</div>
+              )}
+            </div>
+          </div>
+        </ChartCard>
+
+        <ChartCard title="Ventas de energía (GWh) - Barras apiladas + línea Total">
+          <div className="h-[320px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={energyData} barCategoryGap="40%">
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="label" />
+                <YAxis tickFormatter={(v) => `${v}`} label={{ value: 'GWh', angle: -90, position: 'insideLeft' }} />
+                <Tooltip formatter={(value: number) => `${formatNumber(value as number)} GWh`} />
+                <Legend />
+                <Bar dataKey="regulados" name="Mercado Regulado" stackId="stacked" fill={STACKED_COLORS.regulados} radius={[6, 6, 0, 0]} />
+                <Bar dataKey="libres" name="Mercado Libre" stackId="stacked" fill={STACKED_COLORS.libres} radius={[6, 6, 0, 0]} />
+                <Bar dataKey="coes" name="Mercado Spot-COES" stackId="stacked" fill={STACKED_COLORS.coes} radius={[6, 6, 0, 0]} />
+                <Line type="monotone" dataKey="totalMercados" name="Total mercados" stroke={STACKED_COLORS.total} strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          {renderStackedTable()}
+        </ChartCard>
+      </div>
+
+      <ChartCard title="Ventas de energía (Millones S/)">
+        {salesData.length === 0 ? (
+          <div className="text-slate-500 text-sm">No se detectó tabla en soles en el Excel.</div>
+        ) : (
+          <>
+            <div className="h-[360px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={salesData} barCategoryGap="25%" barGap={-12}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="label" />
+                  <YAxis tickFormatter={(v) => `${v}`} label={{ value: 'Millones S/ ', angle: -90, position: 'insideLeft' }} />
+                  <Tooltip formatter={(value: number) => `${formatNumber(value as number, 2)} MM S/`} />
+                  <Legend />
+                  <Bar dataKey="total" name="TOTAL" fill={SALES_COLORS.total} barSize={38} radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="regulados" name="REGULADOS" stackId="sales" fill={SALES_COLORS.regulados} barSize={24} radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="libres" name="LIBRES" stackId="sales" fill={SALES_COLORS.libres} barSize={24} radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="coes_spot" name="COES-SPOT" stackId="sales" fill={SALES_COLORS.coes} barSize={24} radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="otros" name="OTROS" stackId="sales" fill={SALES_COLORS.otros} barSize={24} radius={[6, 6, 0, 0]} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+            {renderSalesTable()}
+          </>
+        )}
+      </ChartCard>
+
+      {overview?.warnings && overview.warnings.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-900 px-4 py-3 rounded-lg">
+          <div className="font-semibold mb-1">Advertencias del parser</div>
+          <ul className="list-disc list-inside text-sm space-y-1">
+            {overview.warnings.map((w, idx) => (
+              <li key={idx}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 };
 
-const SummaryItem: React.FC<{label: string, color: string, value: number, unit: string}> = ({label, color, value, unit}) => (
-  <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-    <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">{label}</div>
-    <div className="flex items-baseline gap-2">
-      <span className={`text-2xl font-black text-${color}-600`}>{value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
-      <span className="text-xs text-slate-400 font-medium">{unit}</span>
-    </div>
-    <div className="mt-4 flex items-center gap-1 text-[10px]">
-      <span className="text-green-500 font-bold">▲ 4.2%</span>
-      <span className="text-slate-300">vs prev period</span>
-    </div>
-  </div>
-);
+export { BalanceDashboard };
