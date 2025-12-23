@@ -151,7 +151,7 @@ def _canonical_header(value: object) -> str:
     return norm
 
 
-YEAR_REGEX = re.compile(r"\b(19|20)\d{2}\b")
+YEAR_REGEX = re.compile(r"(19|20)\d{2}")
 
 
 def _extract_year_from_title(sheet_name: str) -> Optional[int]:
@@ -178,16 +178,17 @@ def _find_title_year(sheet) -> Optional[int]:
 
 def _score_version(sheet_name: str) -> tuple[float, int, str]:
     norm = normalize_label(sheet_name)
+    norm_spaced = re.sub(r"(?<=\d)(?=[A-Z])", " ", norm)
     revision_number = 0
 
-    if re.search(r"R\s*-?\s*2\b", norm) or re.search(r"\(R\s*-?\s*2\)", sheet_name, re.IGNORECASE):
+    if re.search(r"\bR\s*2\b", norm_spaced):
         return 4.0, revision_number, "R2"
-    if re.search(r"R\s*-?\s*1\b", norm) or re.search(r"\(R\s*-?\s*1\)", sheet_name, re.IGNORECASE):
+    if re.search(r"\bR\s*1\b", norm_spaced):
         return 3.0, revision_number, "R1"
-    if re.search(r"V\s*-?\s*1\b", norm) or "V1" in norm:
+    if re.search(r"\bV\s*1\b", norm_spaced):
         return 2.0, revision_number, "V1"
 
-    rev_matches = [m for m in re.finditer(r"REV\s*-?\s*(\d+)?", norm)]
+    rev_matches = [m for m in re.finditer(r"\bREV\s*(\d+)?", norm_spaced)]
     if rev_matches:
         revision_number = max(int(m.group(1) or 0) for m in rev_matches)
         return 1.0 + revision_number / 1000.0, revision_number, f"REV{revision_number or ''}"
@@ -363,9 +364,14 @@ class BalanceTransformer:
         )
 
     def _extract_table(self, df: pd.DataFrame, header_idx: int, is_sales: bool) -> tuple[list[str], list[bool], Dict[str, List[float]], List[str]]:
-        raw_headers = [_canonical_header(v) for v in df.iloc[header_idx].tolist()]
-        desc_col_idx = next((idx for idx, val in enumerate(raw_headers) if val == "descripcion"), 0)
-        month_columns = [(idx, val) for idx, val in enumerate(raw_headers) if val in MONTH_ALIASES.values()]
+        header_values = df.iloc[header_idx].tolist()
+        raw_headers = [_canonical_header(v) for v in header_values]
+        desc_col_idx = next((idx for idx, val in enumerate(header_values) if normalize_label(val).startswith("DESCRIPCION")), None)
+        if desc_col_idx is None:
+            desc_col_idx = next((idx for idx, val in enumerate(raw_headers) if val == "descripcion"), 0)
+
+        month_columns = [(idx, val) for idx, val in enumerate(raw_headers) if val in MONTH_ALIASES.values() or val == "acumulado"]
+        month_columns = [(idx, val) for idx, val in month_columns if val != "acumulado"] + [(idx, val) for idx, val in month_columns if val == "acumulado"]
         if not month_columns:
             raise ValueError("No se encontraron columnas de meses.")
 
@@ -386,23 +392,63 @@ class BalanceTransformer:
                     month_presence[midx] = month_presence[midx] or parsed != 0
             data_rows.append((desc_norm, values, row_list))
 
-        targets = _TARGET_ROWS_SALES if is_sales else _TARGET_ROWS_ENERGY
-        series: Dict[str, List[float]] = {k: [0.0 for _ in month_columns] for k in targets}
         warnings: List[str] = []
 
         if is_sales:
-            for metric, patterns in targets.items():
-                matched = next((row for row in data_rows if _match_row(patterns, row[0])), None)
-                if matched:
-                    series[metric] = matched[1]
-                else:
-                    warnings.append(f"No se encontró fila para '{metric}'.")
+            regulados_patterns = _TARGET_ROWS_SALES["regulados"] + ["USUARIOS REGULADOS", "USAURIOS REGULADOS"]
+            libres_patterns = _TARGET_ROWS_SALES["libres"] + ["USUARIOS LIBRES", "USAURIOS LIBRES"]
+            venta_patterns = ["VENTA DE ENERGIA", "VENTA ENERGIA"]
+
+            venta_row = next((row for row in data_rows if _match_row(venta_patterns, row[0])), None)
+            regulados_row = next((row for row in data_rows if _match_row(regulados_patterns, row[0])), None)
+            libres_row = next((row for row in data_rows if _match_row(libres_patterns, row[0])), None)
+            otros_row = next((row for row in data_rows if _match_row(_TARGET_ROWS_SALES["otros"], row[0])), None)
+
+            if venta_row is None:
+                warnings.append("No se encontró fila para 'Venta de energía'.")
+            if regulados_row is None:
+                warnings.append("No se encontró fila para 'A emp. Distribuidoras / Usuarios Regulados'.")
+            if libres_row is None:
+                warnings.append("No se encontró fila para 'A clientes Libres / Usuarios Libres'.")
+
+            venta_values = venta_row[1] if venta_row else [0.0 for _ in month_columns]
+            regulados_values = regulados_row[1] if regulados_row else [0.0 for _ in month_columns]
+            libres_values = libres_row[1] if libres_row else [0.0 for _ in month_columns]
+            otros_values = otros_row[1] if otros_row else [0.0 for _ in month_columns]
+
+            coes_spot_values: List[float] = []
+            for idx, total in enumerate(venta_values):
+                spot = total - regulados_values[idx] - libres_values[idx]
+                if abs(spot) < 1e-6:
+                    spot = 0.0
+                if spot < 0:
+                    warnings.append(f"Venta de energía menor que la suma de regulado/libre en mes {idx + 1}. Se clampa a 0.")
+                    spot = 0.0
+                coes_spot_values.append(spot)
+
+            for idx, total in enumerate(venta_values):
+                if total == 0:
+                    continue
+                if abs(total - (regulados_values[idx] + libres_values[idx] + coes_spot_values[idx])) > 1e-3:
+                    warnings.append(f"Diferencia en balance de ventas mes {idx + 1}: total vs sumatoria.")
+
+            series = {
+                "regulados": regulados_values,
+                "libres": libres_values,
+                "coes_spot": coes_spot_values,
+                "otros": otros_values,
+            }
         else:
+            targets = _TARGET_ROWS_ENERGY
+            series = {k: [0.0 for _ in month_columns] for k in targets}
             current_section: Optional[str] = None
             servicios_aux_preferred: Optional[List[float]] = None
             servicios_aux_fallback: Optional[List[float]] = None
             fallback_venta_matches: Dict[str, List[float]] = {}
+            venta_total_values: Optional[List[float]] = None
             for desc_norm, values, _ in data_rows:
+                if _match_row(["VENTA DE ENERGIA", "VENTA ENERGIA"], desc_norm):
+                    venta_total_values = values
                 section = _detect_section(desc_norm)
                 if section:
                     current_section = section
@@ -445,13 +491,30 @@ class BalanceTransformer:
                 if all(val == 0 for val in series[metric]) and metric in fallback_venta_matches:
                     series[metric] = fallback_venta_matches[metric]
 
+            if venta_total_values is not None and any(val != 0 for val in venta_total_values):
+                residual_spot: List[float] = []
+                for idx, total in enumerate(venta_total_values):
+                    spot = total - series["regulados"][idx] - series["libres"][idx]
+                    if abs(spot) < 1e-6:
+                        spot = 0.0
+                    if spot < 0:
+                        warnings.append(f"Venta de energía menor que la suma regulado/libre en mes {idx + 1}. Se clampa a 0.")
+                        spot = 0.0
+                    residual_spot.append(spot)
+                series["coes"] = residual_spot
+                for idx, total in enumerate(venta_total_values):
+                    if total == 0:
+                        continue
+                    if abs(total - (series["regulados"][idx] + series["libres"][idx] + series["coes"][idx])) > 1e-3:
+                        warnings.append(f"Diferencia en balance de energía mes {idx + 1}: total vs sumatoria.")
+
             for metric in targets:
                 if all(val == 0 for val in series[metric]):
                     warnings.append(f"No se encontró fila para '{metric}'.")
 
         last_with_data = -1
         for midx, present in enumerate(month_presence):
-            if present or any(series[m][midx] != 0 for m in targets):
+            if present or any(series[m][midx] != 0 for m in series):
                 last_with_data = midx
 
         active_month_columns = month_columns if last_with_data < 0 else month_columns[: last_with_data + 1]
@@ -460,19 +523,19 @@ class BalanceTransformer:
 
         aligned_months: List[str] = []
         aligned_presence: List[bool] = []
-        aligned: Dict[str, List[float]] = {k: [] for k in targets}
+        aligned: Dict[str, List[float]] = {k: [] for k in series}
         for target_month in MONTH_ORDER:
             if target_month in active_month_names:
                 idx = active_month_names.index(target_month)
                 aligned_months.append(target_month)
                 aligned_presence.append(active_presence[idx] if idx < len(active_presence) else False)
-                for metric in targets:
+                for metric in series:
                     aligned[metric].append(series[metric][idx] if idx < len(series[metric]) else 0.0)
             else:
                 warnings.append(f"Mes '{target_month}' no encontrado en la tabla. Se usa 0.")
                 aligned_months.append(target_month)
                 aligned_presence.append(False)
-                for metric in targets:
+                for metric in series:
                     aligned[metric].append(0.0)
 
         if warnings:
