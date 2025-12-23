@@ -327,8 +327,8 @@ def fetch_balance_overview(source_id: str | None = None) -> dict:
         for idx, month in enumerate(year_data["months"]):
             if month not in observed:
                 continue
-            label = f\"{month}-{str(year)[-2:]}\"
-            period_key = f\"{year}-{idx + 1:02d}\"
+            label = f"{month}-{str(year)[-2:]}"
+            period_key = f"{year}-{idx + 1:02d}"
             regulados = year_data["regulados"][idx]
             libres = year_data["libres"][idx]
             coes = year_data["coes"][idx]
@@ -355,8 +355,8 @@ def fetch_balance_overview(source_id: str | None = None) -> dict:
         for idx, month in enumerate(sales_data["months"]):
             if sales_observed and month not in sales_observed:
                 continue
-            label = f\"{month}-{str(year)[-2:]}\"
-            period_key = f\"{year}-{idx + 1:02d}\"
+            label = f"{month}-{str(year)[-2:]}"
+            period_key = f"{year}-{idx + 1:02d}"
             sales_points.append(
                 {
                     "year": year,
