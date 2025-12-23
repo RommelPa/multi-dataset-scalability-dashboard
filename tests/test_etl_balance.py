@@ -61,9 +61,80 @@ class ParseBalanceWorkbookTests(unittest.TestCase):
         excel_path = _build_sample_workbook(tmp_dir)
         result_2025 = next(r for r in parse_balance_workbook(excel_path) if r.year == 2025)
         self.assertEqual(result_2025.observed_months, ["Ene", "Feb"])
-        self.assertEqual(result_2025.regulados[:2], [1000, 1100])
-        self.assertEqual(result_2025.libres[:2], [500, 600])
-        self.assertEqual(result_2025.coes[:2], [200, 250])
+        self.assertEqual(result_2025.energy.regulados[:2], [1000, 1100])
+        self.assertEqual(result_2025.energy.libres[:2], [500, 600])
+        self.assertEqual(result_2025.energy.coes[:2], [200, 250])
+
+    @unittest.skipUnless(Workbook and etl, "Dependencias (openpyxl/pandas) no disponibles en el entorno de prueba")
+    def test_sheet_selection_prefers_latest_versions(self):
+        tmp_dir = Path(self._get_tmp_dir())
+        wb = Workbook()
+        wb.remove(wb.active)
+        sheet_names = [
+            "2016 (rev3)",
+            "2017",
+            "2018",
+            "2018-R1",
+            "2018-R2 (LDS)",
+            "2019",
+            "2019-R1",
+            "2019-R2",
+            "2020",
+            "2020 R1",
+            "2020 R2",
+            "2021",
+            "2021-R1",
+            "2021-R2",
+            "2022",
+            "2022-R1",
+            "2023",
+            "2023-R1",
+            "2024",
+            "2024-R1",
+            "2025",
+            "2025V1",
+            "R",
+            "Perfil",
+        ]
+        for name in sheet_names:
+            wb.create_sheet(title=name)
+
+        transformer = etl.BalanceTransformer(wb)
+        candidates = transformer._select_candidates()
+        self.assertEqual(set(candidates.keys()), set(range(2016, 2026)))
+        self.assertEqual(candidates[2018].sheet_name, "2018-R2 (LDS)")
+        self.assertEqual(candidates[2019].sheet_name, "2019-R2")
+        self.assertEqual(candidates[2020].sheet_name, "2020 R2")
+        self.assertEqual(candidates[2025].sheet_name, "2025V1")
+        self.assertEqual(candidates[2016].sheet_name, "2016 (rev3)")
+
+    @unittest.skipUnless(Workbook and etl, "Dependencias (openpyxl/pandas) no disponibles en el entorno de prueba")
+    def test_coes_taken_from_sale_block_only(self):
+        tmp_dir = Path(self._get_tmp_dir())
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "2019"
+        ws["A1"] = "BALANCE DE ENERGÍA EN MWh - AÑO 2019"
+        ws.append([])
+        ws.append(["DESCRIPCIÓN", "Enero", "Febrero", "Marzo", "Acumulado"])
+        ws.append(["Venta de energía", None, None, None, None])
+        ws.append(["A emp. Distribuidoras", 10, 11, 12, 33])
+        ws.append(["A clientes Libres", 20, 21, 22, 63])
+        ws.append(["COES", 50, 60, 70, 180])
+        ws.append(["Compra de energía", None, None, None, None])
+        ws.append(["COES", 0, 0, 0, 0])
+        ws.append(["Consumo propio de centrales", 5, 6, 7, 18])
+        ws.append(["Pérdidas Sistemas Transmisión", 1, 2, 3, 6])
+
+        with NamedTemporaryFile(delete=False, suffix=".xlsx", dir=tmp_dir) as tmp:
+            wb.save(tmp.name)
+            excel_path = Path(tmp.name)
+
+        result = next(r for r in etl.parse_balance_workbook(excel_path) if r.year == 2019)
+        self.assertEqual(result.energy.coes[:3], [50.0, 60.0, 70.0])
+        self.assertEqual(result.energy.regulados[:2], [10.0, 11.0])
+        self.assertEqual(result.energy.libres[:2], [20.0, 21.0])
+        self.assertTrue(result.energy.perdidas[0] > 0)
 
     def _get_tmp_dir(self) -> str:
         # Generate a dedicated temp dir inside the test run folder

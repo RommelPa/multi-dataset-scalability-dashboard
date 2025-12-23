@@ -16,6 +16,12 @@ from .db import record_etl_run, save_balance_rows, save_balance_sales_rows, upse
 logger = logging.getLogger(__name__)
 
 
+def parse_balance_workbook(path: Path, source_id: str = DEFAULT_SOURCE_ID) -> List[BalanceParseResult]:
+    workbook = load_workbook(path, data_only=True)
+    transformer = BalanceTransformer(workbook, source_id=source_id)
+    return transformer.transform()
+
+
 def process_balance_file(path: Path, dispatch_event: Callable[[dict], None], source_id: str = DEFAULT_SOURCE_ID) -> None:
     logger.info("Procesando archivo %s", path)
     warnings: List[str] = []

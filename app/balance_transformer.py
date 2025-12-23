@@ -76,12 +76,9 @@ class BalanceParseResult:
 class _SheetCandidate:
     year: int
     sheet_name: str
-    version_priority: int
+    version_priority: float
     revision_number: int
     sheet: object
-
-
-_VERSION_PRIORITY = {"R2": 5, "R1": 4, "V1": 3, "REV": 2, "BASE": 1}
 
 _TARGET_ROWS_ENERGY: Dict[str, List[str]] = {
     "regulados": ["A EMP. DISTRIBUIDORAS", "A EMP DISTRIBUIDORAS", "MERCADO REGULADO", "REGULADOS"],
@@ -100,7 +97,7 @@ _TARGET_ROWS_SALES: Dict[str, List[str]] = {
 
 
 def normalize_label(value: object) -> str:
-    """Uppercase, remove accents, collapse spaces, strip trailing colon/hyphen variants."""
+    """Uppercase, remove accents, collapse spaces and punctuation for robust comparisons."""
     if value is None:
         return ""
     text = str(value)
@@ -108,7 +105,7 @@ def normalize_label(value: object) -> str:
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = text.upper().strip()
     text = text.replace("–", "-").replace("—", "-")
-    text = text.rstrip(":")
+    text = re.sub(r"[;.:]", " ", text)
     text = text.replace("-", " ")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
@@ -154,32 +151,48 @@ def _canonical_header(value: object) -> str:
     return norm
 
 
+YEAR_REGEX = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _extract_year_from_title(sheet_name: str) -> Optional[int]:
+    spaced = re.sub(r"(?<=\d)(?=[A-Za-z])", " ", sheet_name)
+    spaced = re.sub(r"(?<=[A-Za-z])(?=\d)", " ", spaced)
+    match = YEAR_REGEX.search(spaced)
+    if match:
+        return int(match.group(0))
+    return None
+
+
 def _find_title_year(sheet) -> Optional[int]:
-    regex = re.compile(r"BALANCE\s+DE\s+ENERG[ÍI]A\s+EN\s+MWH\s*-\s*A[ÑN]O\s*(\d{4})", re.IGNORECASE)
+    regex = re.compile(r"BALANCE\s+DE\s+ENERG[ÍI]A\s+EN\s+MWH.*?(19|20)\d{2}", re.IGNORECASE)
     for row in sheet.iter_rows(values_only=True):
         for cell in row:
             if isinstance(cell, str):
                 match = regex.search(cell)
                 if match:
-                    return int(match.group(1))
+                    year_match = YEAR_REGEX.search(match.group(0))
+                    if year_match:
+                        return int(year_match.group(0))
     return None
 
 
-def _score_version(sheet_name: str) -> tuple[int, int, str]:
-    compact = re.sub(r"\s+", "", sheet_name.upper())
-    compact = compact.replace("(", "").replace(")", "")
+def _score_version(sheet_name: str) -> tuple[float, int, str]:
+    norm = normalize_label(sheet_name)
     revision_number = 0
-    if "R2" in compact:
-        return _VERSION_PRIORITY["R2"], revision_number, "R2"
-    if "R1" in compact:
-        return _VERSION_PRIORITY["R1"], revision_number, "R1"
-    if "V1" in compact:
-        return _VERSION_PRIORITY["V1"], revision_number, "V1"
-    rev_match = re.search(r"REV(?:ISION)?(\d+)?", compact)
-    if rev_match:
-        revision_number = int(rev_match.group(1) or 0)
-        return _VERSION_PRIORITY["REV"], revision_number, f"REV{revision_number or ''}"
-    return _VERSION_PRIORITY["BASE"], revision_number, "BASE"
+
+    if re.search(r"R\s*-?\s*2\b", norm) or re.search(r"\(R\s*-?\s*2\)", sheet_name, re.IGNORECASE):
+        return 4.0, revision_number, "R2"
+    if re.search(r"R\s*-?\s*1\b", norm) or re.search(r"\(R\s*-?\s*1\)", sheet_name, re.IGNORECASE):
+        return 3.0, revision_number, "R1"
+    if re.search(r"V\s*-?\s*1\b", norm) or "V1" in norm:
+        return 2.0, revision_number, "V1"
+
+    rev_matches = [m for m in re.finditer(r"REV\s*-?\s*(\d+)?", norm)]
+    if rev_matches:
+        revision_number = max(int(m.group(1) or 0) for m in rev_matches)
+        return 1.0 + revision_number / 1000.0, revision_number, f"REV{revision_number or ''}"
+
+    return 0.0, revision_number, "BASE"
 
 
 def _match_row(targets: List[str], candidate: str) -> bool:
@@ -187,6 +200,37 @@ def _match_row(targets: List[str], candidate: str) -> bool:
         if target in candidate:
             return True
     return False
+
+
+def _detect_section(label: str) -> Optional[str]:
+    if not label:
+        return None
+    if "VENTA DE ENERGIA" in label or label.startswith("VENTA ENERGIA") or label.startswith("VENTA DE ENER"):
+        return "venta"
+    if "COMPRA DE ENERGIA" in label or label.startswith("COMPRA ENER") or label.startswith("COMPRA DE ENER"):
+        return "compra"
+    return None
+
+
+def _is_blank_row(row: List[object]) -> bool:
+    return all(
+        cell is None or (isinstance(cell, float) and pd.isna(cell)) or (isinstance(cell, str) and cell.strip() == "")
+        for cell in row
+    )
+
+
+def _locate_title_row(df: pd.DataFrame, expected_year: int) -> Optional[int]:
+    regex = re.compile(r"BALANCE\s+DE\s+ENERG[ÍI]A\s+EN\s+MWH.*?(19|20)\d{2}", re.IGNORECASE)
+    title_idx: Optional[int] = None
+    for idx, row in df.iterrows():
+        for cell in row.tolist():
+            if isinstance(cell, str) and regex.search(cell):
+                year_match = YEAR_REGEX.search(cell)
+                if year_match and int(year_match.group(0)) == expected_year:
+                    return idx
+                if title_idx is None:
+                    title_idx = idx
+    return title_idx
 
 
 class BalanceTransformer:
@@ -208,8 +252,9 @@ class BalanceTransformer:
     def _select_candidates(self) -> Dict[int, _SheetCandidate]:
         selected: Dict[int, _SheetCandidate] = {}
         for sheet in self.workbook.worksheets:
-            year = _find_title_year(sheet)
+            year = _extract_year_from_title(sheet.title)
             if not year:
+                logger.info("Se ignora hoja %s (sin año detectable en el nombre)", sheet.title)
                 continue
             version_priority, revision_number, label = _score_version(sheet.title)
             candidate = _SheetCandidate(
@@ -236,6 +281,7 @@ class BalanceTransformer:
     def _parse_sheet(self, sheet, year: int, sheet_name: str) -> BalanceParseResult:
         df = pd.DataFrame(sheet.values)
         header_indices: List[int] = []
+        title_row_idx = _locate_title_row(df, year)
         for idx, row in df.iterrows():
             normalized = [_canonical_header(v) for v in row.tolist()]
             month_hits = sum(val in MONTH_ALIASES.values() for val in normalized)
@@ -244,6 +290,9 @@ class BalanceTransformer:
 
         if not header_indices:
             raise ValueError("No se encontró fila de encabezados con 'DESCRIPCIÓN' y meses.")
+
+        if title_row_idx is not None:
+            header_indices = [idx for idx in header_indices if idx > title_row_idx] or header_indices
 
         energy_series: Optional[BalanceEnergySeries] = None
         sales_series: Optional[BalanceSalesSeries] = None
@@ -315,63 +364,120 @@ class BalanceTransformer:
 
     def _extract_table(self, df: pd.DataFrame, header_idx: int, is_sales: bool) -> tuple[list[str], list[bool], Dict[str, List[float]], List[str]]:
         raw_headers = [_canonical_header(v) for v in df.iloc[header_idx].tolist()]
-        data = df.iloc[header_idx + 1 :].copy().dropna(how="all")
-        month_columns = [c for c in raw_headers if c in MONTH_ALIASES.values()]
+        desc_col_idx = next((idx for idx, val in enumerate(raw_headers) if val == "descripcion"), 0)
+        month_columns = [(idx, val) for idx, val in enumerate(raw_headers) if val in MONTH_ALIASES.values()]
         if not month_columns:
             raise ValueError("No se encontraron columnas de meses.")
 
-        targets = _TARGET_ROWS_SALES if is_sales else _TARGET_ROWS_ENERGY
-        series: Dict[str, List[float]] = {k: [] for k in targets}
-        warnings: List[str] = []
+        data_rows: List[tuple[str, List[float], List[object]]] = []
         month_presence = [False for _ in month_columns]
+        for ridx in range(header_idx + 1, len(df)):
+            row_list = df.iloc[ridx].tolist()
+            if _is_blank_row(row_list):
+                break
+            desc_raw = row_list[desc_col_idx] if desc_col_idx < len(row_list) else ""
+            desc_norm = normalize_label(desc_raw)
+            values: List[float] = []
+            for midx, (col_idx, _) in enumerate(month_columns):
+                raw_value = row_list[col_idx] if col_idx < len(row_list) else None
+                parsed = parse_number(raw_value)
+                values.append(parsed)
+                if raw_value not in (None, "", "-") and not (isinstance(raw_value, float) and pd.isna(raw_value)):
+                    month_presence[midx] = month_presence[midx] or parsed != 0
+            data_rows.append((desc_norm, values, row_list))
 
-        for metric, patterns in targets.items():
-            values_by_month: List[float] = []
-            matched_row = None
-            for _, row in data.iterrows():
-                desc = normalize_label(row.get("descripcion", ""))
-                if _match_row(patterns, desc):
-                    matched_row = row
-                    break
+        targets = _TARGET_ROWS_SALES if is_sales else _TARGET_ROWS_ENERGY
+        series: Dict[str, List[float]] = {k: [0.0 for _ in month_columns] for k in targets}
+        warnings: List[str] = []
 
-            if matched_row is None:
-                warnings.append(f"No se encontró fila para '{metric}'.")
-                values_by_month = [0.0 for _ in month_columns]
-            else:
-                for midx, col in enumerate(month_columns):
-                    raw_value = matched_row.get(col)
-                    parsed = parse_number(raw_value)
-                    values_by_month.append(parsed)
-                    if raw_value not in (None, "", "-") and not (isinstance(raw_value, float) and pd.isna(raw_value)):
-                        month_presence[midx] = month_presence[midx] or parsed != 0
-            series[metric] = values_by_month
+        if is_sales:
+            for metric, patterns in targets.items():
+                matched = next((row for row in data_rows if _match_row(patterns, row[0])), None)
+                if matched:
+                    series[metric] = matched[1]
+                else:
+                    warnings.append(f"No se encontró fila para '{metric}'.")
+        else:
+            current_section: Optional[str] = None
+            servicios_aux_preferred: Optional[List[float]] = None
+            servicios_aux_fallback: Optional[List[float]] = None
+            fallback_venta_matches: Dict[str, List[float]] = {}
+            for desc_norm, values, _ in data_rows:
+                section = _detect_section(desc_norm)
+                if section:
+                    current_section = section
+                    continue
+                if not desc_norm:
+                    continue
 
-        aligned_months: List[str] = []
-        aligned: Dict[str, List[float]] = {k: [] for k in targets}
+                if current_section is None:
+                    if _match_row(_TARGET_ROWS_ENERGY["regulados"], desc_norm):
+                        fallback_venta_matches["regulados"] = values
+                    if _match_row(_TARGET_ROWS_ENERGY["libres"], desc_norm):
+                        fallback_venta_matches["libres"] = values
+                    if _match_row(_TARGET_ROWS_ENERGY["coes"], desc_norm):
+                        fallback_venta_matches["coes"] = values
+
+                if current_section == "venta":
+                    if series.get("regulados") == [0.0 for _ in month_columns] and _match_row(_TARGET_ROWS_ENERGY["regulados"], desc_norm):
+                        series["regulados"] = values
+                    if series.get("libres") == [0.0 for _ in month_columns] and _match_row(_TARGET_ROWS_ENERGY["libres"], desc_norm):
+                        series["libres"] = values
+                    if series.get("coes") == [0.0 for _ in month_columns] and _match_row(_TARGET_ROWS_ENERGY["coes"], desc_norm):
+                        series["coes"] = values
+
+                if _match_row(_TARGET_ROWS_ENERGY["perdidas"], desc_norm):
+                    if series.get("perdidas") == [0.0 for _ in month_columns]:
+                        series["perdidas"] = values
+
+                if _match_row(["SERVICIOS AUXILIARES"], desc_norm):
+                    servicios_aux_preferred = servicios_aux_preferred or values
+                    continue
+                if _match_row(["CONSUMO PROPIO DE CENTRALES", "CONSUMO PROPIO"], desc_norm):
+                    servicios_aux_fallback = servicios_aux_fallback or values
+
+            if servicios_aux_preferred is not None:
+                series["servicios_aux"] = servicios_aux_preferred
+            elif servicios_aux_fallback is not None:
+                series["servicios_aux"] = servicios_aux_fallback
+
+            for metric in ("regulados", "libres", "coes"):
+                if all(val == 0 for val in series[metric]) and metric in fallback_venta_matches:
+                    series[metric] = fallback_venta_matches[metric]
+
+            for metric in targets:
+                if all(val == 0 for val in series[metric]):
+                    warnings.append(f"No se encontró fila para '{metric}'.")
+
         last_with_data = -1
         for midx, present in enumerate(month_presence):
             if present or any(series[m][midx] != 0 for m in targets):
                 last_with_data = midx
 
         active_month_columns = month_columns if last_with_data < 0 else month_columns[: last_with_data + 1]
+        active_presence = month_presence if last_with_data < 0 else month_presence[: last_with_data + 1]
+        active_month_names = [name for _, name in active_month_columns]
 
+        aligned_months: List[str] = []
+        aligned_presence: List[bool] = []
+        aligned: Dict[str, List[float]] = {k: [] for k in targets}
         for target_month in MONTH_ORDER:
-            if target_month in active_month_columns:
-                idx = active_month_columns.index(target_month)
+            if target_month in active_month_names:
+                idx = active_month_names.index(target_month)
                 aligned_months.append(target_month)
+                aligned_presence.append(active_presence[idx] if idx < len(active_presence) else False)
                 for metric in targets:
-                    aligned[metric].append(series[metric][idx])
+                    aligned[metric].append(series[metric][idx] if idx < len(series[metric]) else 0.0)
             else:
                 warnings.append(f"Mes '{target_month}' no encontrado en la tabla. Se usa 0.")
                 aligned_months.append(target_month)
+                aligned_presence.append(False)
                 for metric in targets:
                     aligned[metric].append(0.0)
 
         if warnings:
             logger.warning("Advertencias al parsear tabla %s: %s", "ventas" if is_sales else "energía", warnings)
-        if len(month_presence) < len(aligned_months):
-            month_presence = month_presence + [False for _ in range(len(aligned_months) - len(month_presence))]
-        return aligned_months, month_presence, aligned, warnings
+        return aligned_months, aligned_presence, aligned, warnings
 
     @staticmethod
     def _missing_rows_report(energy_series: BalanceEnergySeries) -> List[str]:
